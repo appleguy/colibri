@@ -4272,7 +4272,7 @@ class APIHandler(BaseHTTPRequestHandler):
     def serve_static(self, path):
         """Serve the built web UI (web/dist) so `coli web` is one process.
         Read-only, no auth (same trust level as /health), traversal-safe."""
-        if path.startswith("/v1/") or path == "/health":
+        if path.startswith("/v1/") or path in ("/health", "/ready"):
             return False
         base = self.WEB_DIST.resolve()
         if not base.is_dir():
@@ -4329,6 +4329,24 @@ class APIHandler(BaseHTTPRequestHandler):
                     hwinfo = getattr(self.server.engine, "hwinfo", None) if self.server.engine else None
                     if hwinfo: payload["hwinfo"] = hwinfo
                 self.send_json(200, payload, request_id)
+                return
+            if path == "/ready":
+                # Readiness is deliberately separate from /health liveness: the
+                # HTTP frontend can remain up after its engine process or dispatcher
+                # has failed. Keep the response body generic; it exposes no model or
+                # hardware details and lets schedulers fail closed without issuing a
+                # token-generating request.
+                engine = self.server.engine
+                process = getattr(engine, "process", None) if engine else None
+                ready = bool(
+                    engine is not None
+                    and not getattr(engine, "closed", False)
+                    and getattr(engine, "dispatcher_error", None) is None
+                    and (process is None or process.poll() is None)
+                )
+                self.send_json(200 if ready else 503,
+                               {"status": "ready" if ready else "not_ready"},
+                               request_id)
                 return
             if path == "/experts":
                 payload = {"rows": 0, "cols": 0, "map": "", "hits": "", "seq": 0}

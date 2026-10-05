@@ -1836,6 +1836,36 @@ class HTTPTest(unittest.TestCase):
         self.assertIn("queued", scheduler)
         self.assertEqual(health["kv_slots"], 2)
 
+    def test_ready_tracks_engine_and_child_process_state(self):
+        class Process:
+            def __init__(self, returncode=None):
+                self.returncode = returncode
+
+            def poll(self):
+                return self.returncode
+
+        with patch.object(self.engine, "closed", False, create=True), \
+             patch.object(self.engine, "dispatcher_error", None, create=True), \
+             patch.object(self.engine, "process", Process(), create=True):
+            with self.request("/ready") as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(json.load(response), {"status": "ready"})
+
+            for closed, dispatcher_error, process in (
+                    (True, None, Process()),
+                    (False, RuntimeError("dispatcher stopped"), Process()),
+                    (False, None, Process(1))):
+                with self.subTest(closed=closed, dispatcher_error=dispatcher_error,
+                                  process_exit=process.returncode):
+                    with patch.object(self.engine, "closed", closed, create=True), \
+                         patch.object(self.engine, "dispatcher_error", dispatcher_error,
+                                      create=True), \
+                         patch.object(self.engine, "process", process, create=True):
+                        with self.assertRaises(HTTPError) as caught:
+                            self.request("/ready")
+                        self.addCleanup(caught.exception.close)
+                        self.assertEqual(caught.exception.code, 503)
+
     def test_health_reports_the_continuation_switch(self):
         """The web UI shows Continue only when this is true: with the switch off a
         trailing assistant turn is answered fresh, which a Continue button would
