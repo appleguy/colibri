@@ -1986,6 +1986,74 @@ static void expert_mats(const GModel *m, const Slot *slot, Mat *gate, Mat *up, M
     *gate = shape[0]; *up = shape[1]; *down = shape[2];
 }
 
+typedef struct {
+    int eid;
+    uint32_t heat;
+} HostExpertCandidate;
+
+static int host_expert_candidate_cmp(const void *ap, const void *bp) {
+    const HostExpertCandidate *a = (const HostExpertCandidate *)ap;
+    const HostExpertCandidate *b = (const HostExpertCandidate *)bp;
+    if (a->heat != b->heat) return a->heat < b->heat ? 1 : -1;
+    return a->eid - b->eid;
+}
+
+/* Optional startup fill for the host expert LRU.
+ *
+ * WRX80 has enough RAM for every routed expert, but the cache is intentionally
+ * lazy by default.  For a dedicated inference host that makes the first real
+ * request pay the disk-fill cost.  Prewarm fills the already-sized cache after
+ * routing history (and, when CUDA is enabled, the hot VRAM tier) is known.
+ * Runtime hit/miss/byte counters are restored afterwards so startup I/O does
+ * not masquerade as request telemetry.
+ */
+static void expert_cache_prewarm(GModel *m) {
+    const char *setting = getenv("GLM53_PREWARM_EXPERTS");
+    if (!setting || !atoi(setting) || !m->streaming || !m->ecache) return;
+
+    const int from = m->c.first_dense > m->layer_begin ? m->c.first_dense : m->layer_begin;
+    const uint64_t saved_miss = m->miss, saved_ebytes = m->ebytes;
+    const double started = now_s();
+    uint64_t loaded = 0, bytes = 0;
+
+    for (int layer = from; layer < m->layer_end; layer++) {
+        LCache *cache = &m->ecache[layer];
+        if (cache->cap < 1) continue;
+
+        HostExpertCandidate *cand = malloc((size_t)m->c.n_experts * sizeof(*cand));
+        if (!cand) { fprintf(stderr, "OOM ranking host expert prewarm\n"); exit(1); }
+        uint32_t *counts = rt_counts(layer);
+        int nc = 0;
+        for (int eid = 0; eid < m->c.n_experts; eid++) {
+#ifdef COLI_CUDA
+            if (cache->cap < m->c.n_experts && m->gpu_expert &&
+                m->gpu_expert[(size_t)layer * m->c.n_experts + eid].resident)
+                continue;
+#endif
+            cand[nc++] = (HostExpertCandidate){eid, counts ? counts[eid] : 0};
+        }
+        qsort(cand, (size_t)nc, sizeof(*cand), host_expert_candidate_cmp);
+        const int want = cache->cap < nc ? cache->cap : nc;
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1)
+#endif
+        for (int j = 0; j < want; j++)
+            expert_read(m, layer, cand[j].eid, &cache->s[j]);
+
+        cache->n = want;
+        for (int j = 0; j < want; j++) cache->s[j].used = ++m->clock;
+        loaded += (uint64_t)want;
+        bytes += (uint64_t)want * (uint64_t)m->e_slot;
+        free(cand);
+    }
+
+    m->miss = saved_miss;
+    m->ebytes = saved_ebytes;
+    fprintf(stderr, "[WARM] GLM53 host experts: %llu slots / %.1f GB in %.1fs\n",
+            (unsigned long long)loaded, bytes / 1e9, now_s() - started);
+}
+
 #ifdef COLI_CUDA
 typedef struct {
     int layer, eid;
@@ -2006,6 +2074,34 @@ static void gpu_expert_free(GpuExpert *e) {
     if (e->u) coli_cuda_tensor_free(e->u);
     if (e->d) coli_cuda_tensor_free(e->d);
     memset(e, 0, sizeof(*e));
+}
+
+static void cuda_resident_matrix_prewarm(GModel *m) {
+    if (!g_cuda_ready || !m || !m->layer) return;
+    size_t before_free = 0, total = 0;
+    coli_cuda_mem_info(g_cuda_device, &before_free, &total);
+    uint64_t mats = 0;
+    for (int i = m->layer_begin; i < m->layer_end; i++) {
+        GLayer *l = &m->layer[i];
+        Mat *all[] = { &l->kq, &l->kk, &l->kv, &l->ko, &l->kga, &l->kgb,
+                       &l->kfa, &l->kfb, &l->kb, &l->qa, &l->qb, &l->kva,
+                       &l->kvb_kt, &l->kvb_v, &l->o, &l->iwq, &l->iwk,
+                       &l->iwp, &l->ikpg, &l->dg, &l->du, &l->dd,
+                       &l->rg, &l->ru, &l->rd };
+        for (size_t k = 0; k < sizeof(all) / sizeof(*all); k++)
+            if (all[k]->resident && (all[k]->fmt == 1 || all[k]->fmt == 4) &&
+                cuda_mat_ensure(all[k])) mats++;
+    }
+    if (m->has_io && m->head.f != m->embed && m->head.resident &&
+        (m->head.fmt == 1 || m->head.fmt == 4) && cuda_mat_ensure(&m->head))
+        mats++;
+    size_t after_free = 0;
+    coli_cuda_mem_info(g_cuda_device, &after_free, &total);
+    fprintf(stderr,
+            "[CUDA] GLM53 resident matrix prewarm: %llu matrices, %.2f GiB VRAM consumed, %.2f GiB free\n",
+            (unsigned long long)mats,
+            before_free > after_free ? (before_free - after_free) / (double)(1ull << 30) : 0.0,
+            after_free / (double)(1ull << 30));
 }
 
 static void cuda_resident_expert_init(GModel *m) {
@@ -4295,8 +4391,10 @@ int main(int argc, char **argv) {
         model_load(&served, snap);
         glm53_telemetry_init(snap, &served.c);
 #ifdef COLI_CUDA
+        cuda_resident_matrix_prewarm(&served);
         cuda_resident_expert_init(&served);
 #endif
+        expert_cache_prewarm(&served);
         Tok serve_tok;
         char tokenizer_path[1024];
         snprintf(tokenizer_path, sizeof(tokenizer_path), "%s/tokenizer.json", snap);
@@ -4356,8 +4454,10 @@ int main(int argc, char **argv) {
     model_load(&model, dir);
     glm53_telemetry_init(dir, &model.c);
 #ifdef COLI_CUDA
+    cuda_resident_matrix_prewarm(&model);
     cuda_resident_expert_init(&model);
 #endif
+    expert_cache_prewarm(&model);
     const double load_seconds = now_s() - load_start;
     if (getenv("GLM53_VERBOSE")) cfg_report(&model.c);
 
