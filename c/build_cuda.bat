@@ -16,7 +16,7 @@ rem   CCBIN       Directory containing the cl.exe nvcc should use as host
 rem               compiler. Set this to force a specific toolset.
 rem   ALLOW_UNSUPPORTED  =1 adds -allow-unsupported-compiler.
 rem ---------------------------------------------------------------------------
-setlocal
+setlocal EnableExtensions EnableDelayedExpansion
 
 rem --- GPU arch: detect from the installed GPU unless overridden ------------
 rem nvidia-smi reports compute capability as e.g. "12.0"; strip the dot for the
@@ -33,34 +33,38 @@ echo WARNING: could not detect GPU compute capability; defaulting to sm_120.>&2
 set "CUDA_ARCH=sm_120"
 :have_arch
 set "CC="
-set "VSINSTALLER=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer"
-set "VSWHERE=%VSINSTALLER%\vswhere.exe"
+rem Some service/automation launchers expose ProgramFiles but omit the
+rem special ProgramFiles(x86) variable. Derive the conventional x64-Windows
+rem location rather than falsely reporting that MSVC is absent.
+set "PF86=%ProgramFiles(x86)%"
+if not defined PF86 set "PF86=%ProgramFiles:~0,2%\Program Files (x86)"
+set "VSINSTALLER=!PF86!\Microsoft Visual Studio\Installer"
+set "VSWHERE=!VSINSTALLER!\vswhere.exe"
 
 rem --- MSVC: nvcc needs cl.exe as its host compiler -------------------------
-rem Prefer the VS 2022 toolset (range [17.0,18.0)); fall back to -latest if no
-rem 2022 install exists.
+rem Ask vswhere for the latest installed x64 C++ toolset. nvcc performs the
+rem authoritative host-compiler compatibility check during compilation.
 if not "%CCBIN%"=="" goto have_msvc
 where cl.exe >nul 2>&1
-if %ERRORLEVEL%==0 goto have_msvc
+if not errorlevel 1 goto have_msvc
 
-if not exist "%VSWHERE%" goto no_msvc
+if not exist "!VSWHERE!" goto no_msvc
 
-rem Invoke vswhere by bare name from its own directory.
+rem Invoke vswhere by bare name from its own directory. Avoid a bracketed
+rem version range here: cmd.exe's FOR /F parser treats both ',' and ')' as
+rem syntax even inside the back-quoted child command.
 set "VSDIR="
-pushd "%VSINSTALLER%"
-for /f "usebackq delims=" %%i in (`vswhere.exe -products * -version "[17.0,18.0)" -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
-if not "%VSDIR%"=="" goto found_vs
-echo WARNING: no VS 2017-2022 found; falling back to the newest install.>&2
-echo          If nvcc reports "unsupported Microsoft Visual Studio version",>&2
-echo          install the 2022 toolset - see the error text at the end.>&2
+pushd "!VSINSTALLER!"
 for /f "usebackq delims=" %%i in (`vswhere.exe -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
 :found_vs
 popd
-if "%VSDIR%"=="" goto no_msvc
-if not exist "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" goto no_msvc
-call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul
+if not defined VSDIR goto no_msvc
+if not exist "!VSDIR!\VC\Auxiliary\Build\vcvars64.bat" goto no_msvc
+call "!VSDIR!\VC\Auxiliary\Build\vcvars64.bat" >nul
 where cl.exe >nul 2>&1
-if not %ERRORLEVEL%==0 goto no_msvc
+if errorlevel 1 goto no_msvc
+cl.exe 2>&1 | findstr /i "x64 AMD64" >nul
+if errorlevel 1 goto no_msvc
 :have_msvc
 
 rem -ccbin pins the host compiler explicitly.
@@ -72,7 +76,7 @@ if "%ALLOW_UNSUPPORTED%"=="1" set "UNSUPPORTED_FLAG=-allow-unsupported-compiler"
 rem --- CUDA -----------------------------------------------------------------
 set "NVCC=nvcc"
 where nvcc.exe >nul 2>&1
-if %ERRORLEVEL%==0 goto have_nvcc
+if not errorlevel 1 goto have_nvcc
 if "%CUDA_PATH%"=="" goto no_cuda
 if not exist "%CUDA_PATH%\bin\nvcc.exe" goto no_cuda
 set "NVCC=%CUDA_PATH%\bin\nvcc.exe"
