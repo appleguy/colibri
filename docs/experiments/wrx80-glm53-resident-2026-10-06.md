@@ -60,3 +60,12 @@ Living checkpoint log for the dedicated WRX80 / RTX 4090 host. Keep entries smal
 - The client received `engine_error` with the server log explicitly saying `colibri engine is shutting down`; this is not a model/CUDA correctness failure.
 - Do not use that request for throughput comparison. Rerun the identical workload on the post-fusion HEAD before changing resident budget.
 - The terminated service reported a 118.9 GiB memory peak and 0 B swap peak.
+
+
+## 2026-10-06 01:xx PDT — aggressive 21 GB jump and storage observation
+
+- Per user direction, skipped the 16/18/20 GB resident sweep and requested `COLI_CUDA_RESIDENT_EXPERT_GB=21` directly with the existing 3 GB live reserve.
+- Placement is safe to probe aggressively: `cuda_resident_expert_init` re-reads live free VRAM before every expert admission and stops unless free VRAM exceeds reserve + next expert logical footprint + 64 MiB allocator margin.
+- The last old 12 GB mode-1 process emitted one-forward profile data before shutdown: attention 9.522 s, FFN 194.730 s, expert disk 177.677 s, head 0.374 s. This is not a clean end-to-end throughput benchmark, but it strongly identifies expert/storage time as dominant.
+- The new 21 GB process spends cold-load time in Linux D state at `p9_client_rpc` while opening shards under `/mnt/e`. The model directory is about 202 GB on the Windows E: 9p mount.
+- Native WSL ext4 has about 932 GB free, enough to stage a complete model copy. After the 21 GB VRAM measurement, A/B the same fixed workload from a native-ext4 model path before further kernel micro-optimization. Do not copy during a timing run because it would contend with the model reads.
