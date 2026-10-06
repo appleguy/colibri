@@ -311,17 +311,14 @@ Use the full model to answer:
 
 ## Current execution cursor
 
-ACTIVE: U01.1.
+ACTIVE: U10.1.
 
 Exact next actions:
-1. Verify no `glm53` benchmark is active and the GPU is free.
-2. Rebuild/copy the validated native binary for source commit `fb61f73` only if the active binary does not already correspond to that source.
-3. Enable one short CHAIN=2 qualification arm from `c/scripts/wrx80_glm53_future_benchmarks.json`.
-4. Use CHAIN=2, ATTN=1, ROUTER=1, INDEXER=1 on the deterministic short workload.
-5. Require mHC pre/norm/post/combined verification, whole residual-bank verification, authoritative indexer success, no fallback/error, and plausible output.
-6. Preserve wall time, VRAM, drift maxima and telemetry before deciding PASS.
-7. Write `chain2-requal-approved.txt` only after evidence review; otherwise keep the full-model comparison marshal blocked.
-8. Update cursor/ledger and then advance to U10 real CHAIN=1 short A/B.
+1. If the full GLM-5.3 comparison marshal is active, do not rebuild or replace native binaries; preserve that benchmark lane.
+2. Prepare a clean exact-source CHAIN=1 short A/B manifest using source commit `fb61f73`, with ordinary GPU attention / authoritative router+indexer and no unfinished sparse-profiler code.
+3. Run global-residency CHAIN=1 first against the frozen ordinary GPU-attention baseline; add the fair-residency arm only after the global result is preserved.
+4. Measure decode tok/s, cumulative attention/FFN/router/indexer, VRAM, host residual downloads, GPU utilization/power, and CPU process time.
+5. If CHAIN=1 is correct and non-regressive, advance to U11 residual-readback removal. Otherwise isolate the regression before changing residency or sparse-attention code.
 
 Independent work allowed while U00/U01 inference is active:
 - offline U40 residency simulation improvements;
@@ -368,3 +365,27 @@ Resume WRX80 native-Windows GLM-5.3 optimization from `docs/experiments/wrx80-gl
 - Source commit: `fb61f73` (`glm53-enable-conservative-chain1-site-entry`).
 - Only `c/glm53.c` was staged/committed; unfinished `c/backend_cuda.cu` profiling work remains owned and uncommitted.
 - U00 is complete. ACTIVE unit is now U01.1 CHAIN=2 short requalification.
+
+
+### Cursor checkpoint: U01.1 CHAIN=2 short requalification - REVIEWED PASS
+
+Exact-source qualification used detached worktree `E:\\z-src\\colibri-u01-chain2` at source commit `fb61f73`, so the main checkout's unfinished `c/backend_cuda.cu` profiling change was not present in the binary.
+
+Run: `u01q-chain2-fb61f73-global-g8`, CHAIN=2 / ATTN=1 / ROUTER=1 / INDEXER=1 / global residency, deterministic 551-token prompt and 8-token decode tail.
+
+Reviewed evidence:
+- 16 pre+norm verification reports: max norm abs 7.15256e-7, post abs 1.78814e-7, comb abs 2.98023e-7;
+- 16 whole-chain residual reports: max abs 9.53674e-7;
+- 16 shared-expert dev-row reports: max abs 1.78814e-7;
+- 16 resident-MoE dev-row reports: max abs 2.98023e-8;
+- 16 shared+resident reports: max abs 2.98023e-8;
+- authoritative indexer: 8/8 reports, final pass=8, fallback=0;
+- no CUDA error, engine_error, mismatch, or nonzero fallback markers;
+- decode: 8 tokens in 10.3 s = 0.776 tok/s; performance is not the purpose of CHAIN=2 qualification;
+- peak CUDA used 22,809.5 MiB, minimum free 1,754 MiB.
+
+The temporary one-run marshal marked `ok=false` only because it required the nonexistent strings `GLM53 shared expert verify` and `GLM53 resident expert verify`. Source inspection confirmed the real labels are `GLM53 shared expert dev-row verify` and `GLM53 resident MoE dev-row verify`, and both appeared with the clean values above. Treat this as a temporary manifest-spec error, not a model failure.
+
+Evidence summary: `E:\\z-results\\glm53-native-2026-10-06\\u01-chain2-review.json`.
+
+U01 is cleared. ACTIVE next unit: U10.1, prepare the first real CHAIN=1 short A/B against ordinary GPU attention. The full GLM-5.3 comparison lane may run first because it is already waiting on the U01 approval sentinel; do not rebuild/replace binaries while that lane is active.

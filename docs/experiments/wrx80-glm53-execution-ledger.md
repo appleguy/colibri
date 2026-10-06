@@ -599,3 +599,27 @@ The conservative CHAIN=1 step-1 source passed the complete isolated validation l
 ### U00 complete - CHAIN=1 step-1 source committed
 
 The conservative CHAIN=1 site-entry/device-FFN/device-post promotion is now committed as `fb61f73` after the full isolated validation ladder passed. Main and isolated source copies matched exactly after newline normalization. The next serialized gate is U01.1 CHAIN=2 short requalification; do not release the full-model comparison sentinel before reviewing that run.
+
+
+### U01.1 CHAIN=2 short requalification - REVIEWED PASS
+
+Exact-source qualification used detached worktree `E:\\z-src\\colibri-u01-chain2` at source commit `fb61f73`, so the main checkout's unfinished `c/backend_cuda.cu` profiling change was not present in the binary.
+
+Run: `u01q-chain2-fb61f73-global-g8`, CHAIN=2 / ATTN=1 / ROUTER=1 / INDEXER=1 / global residency, deterministic 551-token prompt and 8-token decode tail.
+
+Reviewed evidence:
+- 16 pre+norm verification reports: max norm abs 7.15256e-7, post abs 1.78814e-7, comb abs 2.98023e-7;
+- 16 whole-chain residual reports: max abs 9.53674e-7;
+- 16 shared-expert dev-row reports: max abs 1.78814e-7;
+- 16 resident-MoE dev-row reports: max abs 2.98023e-8;
+- 16 shared+resident reports: max abs 2.98023e-8;
+- authoritative indexer: 8/8 reports, final pass=8, fallback=0;
+- no CUDA error, engine_error, mismatch, or nonzero fallback markers;
+- decode: 8 tokens in 10.3 s = 0.776 tok/s; performance is not the purpose of CHAIN=2 qualification;
+- peak CUDA used 22,809.5 MiB, minimum free 1,754 MiB.
+
+The temporary one-run marshal marked `ok=false` only because it required the nonexistent strings `GLM53 shared expert verify` and `GLM53 resident expert verify`. Source inspection confirmed the real labels are `GLM53 shared expert dev-row verify` and `GLM53 resident MoE dev-row verify`, and both appeared with the clean values above. Treat this as a temporary manifest-spec error, not a model failure.
+
+Evidence summary: `E:\\z-results\\glm53-native-2026-10-06\\u01-chain2-review.json`.
+
+U01 is cleared. ACTIVE next unit: U10.1, prepare the first real CHAIN=1 short A/B against ordinary GPU attention. The full GLM-5.3 comparison lane may run first because it is already waiting on the U01 approval sentinel; do not rebuild/replace binaries while that lane is active.
