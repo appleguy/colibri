@@ -1270,22 +1270,27 @@ static void mla_layer(const Cfg *c, const GLayer *l, const float *x, int tokens,
     int cuda_attn_ok = 0;
     if (cuda_attn_mode && width <= 4096) {
         GLayer *mutable_l = (GLayer *)l;
-        cuda_context = malloc((size_t)tokens * H * V * sizeof(*cuda_context));
-        if (!cuda_context) { fprintf(stderr, "OOM allocating CUDA MLA verify context\n"); exit(1); }
         g_cuda_attn_attempts++;
         const double cuda_attn_t0 = omp_get_wtime();
-        if (cuda_mat_ensure(&mutable_l->kvb_v))
-            cuda_attn_ok = coli_cuda_attention_absorbed_sparse_batch(
-                (ColiCudaTensor *)mutable_l->kvb_v.cuda, cuda_context, absorbed,
-                latent, selected, tokens, H, V, L, seen, width, scale);
+        if (cuda_attn_mode == 1) {
+            if (cuda_mat_ensure(&mutable_l->kvb_v) && cuda_mat_ensure(&mutable_l->o))
+                cuda_attn_ok = coli_cuda_attention_absorbed_sparse_project_batch(
+                    (ColiCudaTensor *)mutable_l->kvb_v.cuda,
+                    (ColiCudaTensor *)mutable_l->o.cuda, out, absorbed,
+                    latent, selected, tokens, H, V, L, seen, width, scale);
+        } else {
+            cuda_context = malloc((size_t)tokens * H * V * sizeof(*cuda_context));
+            if (!cuda_context) { fprintf(stderr, "OOM allocating CUDA MLA verify context\n"); exit(1); }
+            if (cuda_mat_ensure(&mutable_l->kvb_v))
+                cuda_attn_ok = coli_cuda_attention_absorbed_sparse_batch(
+                    (ColiCudaTensor *)mutable_l->kvb_v.cuda, cuda_context, absorbed,
+                    latent, selected, tokens, H, V, L, seen, width, scale);
+        }
         g_cuda_attn_seconds += omp_get_wtime() - cuda_attn_t0;
         if (cuda_attn_ok) g_cuda_attn_success++;
         else g_cuda_attn_fallback++;
         if (cuda_attn_mode == 1 && cuda_attn_ok) {
-            for (int t = 0; t < tokens; t++)
-                mv(out + (size_t)t * c->hidden, &l->o,
-                   cuda_context + (size_t)t * H * V);
-            free(cuda_context); free(score); free(pooled); free(context);
+            free(score); free(pooled); free(context);
             free(selected); free(valid); free(head_w); free(iq);
             free(absorbed); free(queries); free(qa);
             return;
