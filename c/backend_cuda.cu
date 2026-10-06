@@ -108,6 +108,7 @@ typedef struct {
     size_t qx_cap, qscale_cap;
     float *host_x,*host_y,*host_kv; size_t host_x_cap,host_y_cap,host_kv_cap;
     float *aq,*al,*ar,*ac; size_t aq_cap,al_cap,ar_cap,ac_cap;
+    int *asel; size_t asel_cap;
     float *pipe_buf[27]; size_t pipe_cap[27];   /* scratch persistenti del resident pipeline */
     cudaStream_t stream;
     cudaEvent_t ev_done; int ev_done_ok;        /* resident-group issue completion (#431 PR-C0) */
@@ -1372,6 +1373,7 @@ extern "C" void coli_cuda_shutdown(void) {
         if (ctx->qx) cudaFree(ctx->qx);
         if (ctx->qscale) cudaFree(ctx->qscale);
         if(ctx->aq)cudaFree(ctx->aq);if(ctx->al)cudaFree(ctx->al);if(ctx->ar)cudaFree(ctx->ar);if(ctx->ac)cudaFree(ctx->ac);
+        if(ctx->asel)cudaFree(ctx->asel);
         for(int b=0;b<27;b++) if(ctx->pipe_buf[b]) cudaFree(ctx->pipe_buf[b]);
         if (ctx->host_x) cudaFreeHost(ctx->host_x);
         if (ctx->host_y) cudaFreeHost(ctx->host_y);
@@ -1396,11 +1398,11 @@ extern "C" void coli_cuda_shutdown(void) {
         ctx->x = ctx->y = ctx->gate = ctx->up = nullptr;
         ctx->dx = ctx->dy = nullptr; ctx->dx_cap = ctx->dy_cap = 0;
         ctx->qx=nullptr; ctx->qscale=nullptr;
-        ctx->aq=ctx->al=ctx->ar=ctx->ac=nullptr;
+        ctx->aq=ctx->al=ctx->ar=ctx->ac=nullptr;ctx->asel=nullptr;
         ctx->host_x=ctx->host_y=ctx->host_kv=nullptr;ctx->stream=nullptr;
         ctx->x_cap = ctx->y_cap = ctx->gate_cap = ctx->up_cap = 0;
         ctx->qx_cap=ctx->qscale_cap=0;
-        ctx->aq_cap=ctx->al_cap=ctx->ar_cap=ctx->ac_cap=0;
+        ctx->aq_cap=ctx->al_cap=ctx->ar_cap=ctx->ac_cap=0;ctx->asel_cap=0;
         ctx->host_x_cap=ctx->host_y_cap=ctx->host_kv_cap=0;
         ctx->group_desc=nullptr; ctx->group_desc_cap=0;
         ctx->glm_group_weights=nullptr; ctx->glm_group_weights_cap=0;

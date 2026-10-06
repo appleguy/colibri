@@ -270,6 +270,16 @@ COLI_CUDA_DLLEXPORT int coli_cuda_attention_project_ragged(ColiCudaTensor *kv_b,
         const float *const *latent,const float *const *rope,
         const int *lengths,int S,int H,int Q,int R,int V,int K,int max_t,float attention_scale);
 
+/* GLM-5.3 absorbed sparse MLA. q_abs is [S,H,K] after its existing
+ * W_k^T projection; selected is [S,width] with -1 for unused entries.
+ * v_proj is the already-absorbed [H*V,K] matrix. This preserves GLM-5.3's
+ * current sparse-index and transformed-weight numerics while moving only the
+ * O(width*K) attention reduction and V projection to CUDA. */
+COLI_CUDA_DLLEXPORT int coli_cuda_attention_absorbed_sparse_batch(
+        ColiCudaTensor *v_proj,float *ctx,const float *q_abs,
+        const float *latent,const int *selected,int S,int H,int V,int K,
+        int T,int width,float attention_scale);
+
 COLI_CUDA_DLLEXPORT void coli_cuda_tensor_free(ColiCudaTensor *tensor);
 COLI_CUDA_DLLEXPORT size_t coli_cuda_tensor_bytes(const ColiCudaTensor *tensor);
 COLI_CUDA_DLLEXPORT size_t coli_cuda_alloc_footprint(size_t bytes);
