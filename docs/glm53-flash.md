@@ -164,6 +164,8 @@ weights, activations, KV state, and scratch. The transient staging path and CPU 
 as fallbacks for cold experts or CUDA refusal.
 Both paths keep the CPU fallback available.
 
+`COLI_CUDA_GLM53_ATTN=1` enables the sparse MLA CUDA fast path. Set it to `2` only for verification: mode 2 computes both CUDA and CPU attention and reports the error envelope, so its wall time is intentionally not representative. `0` keeps the CPU attention core.
+
 ## Tests
 
 ```
