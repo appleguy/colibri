@@ -2000,7 +2000,8 @@ static int expert_group_impl(ColiCudaTensor *const *gates,
                              ColiCudaTensor *const *downs,
                              const int *rows, int count,
                              float *y, const float *x,
-                             int pin_small_batch, float swiglu_limit) {
+                             int pin_small_batch, float swiglu_limit,
+                             int weights_preuploaded) {
     if (fault_injected()) return 0;
     if (!gates || !ups || !downs || !rows || !x || !y || count < 1) return 0;
     ColiCudaTensor *first=gates[0];
@@ -2045,7 +2046,8 @@ static int expert_group_impl(ColiCudaTensor *const *gates,
     /* GLM lazily uploads selected experts immediately before this call.
      * Upload converts packed nibbles on the legacy stream; wait once before
      * the non-blocking grouped stream consumes those weights. */
-    if(swiglu_limit>0.f && !cuda_ok(cudaDeviceSynchronize(),"clamped expert upload synchronize")) return 0;
+    if(swiglu_limit>0.f && !weights_preuploaded &&
+       !cuda_ok(cudaDeviceSynchronize(),"clamped expert upload synchronize")) return 0;
     if(!prepare_group_weights(ctx,gates,ups,downs,count,host)) return 0;
     size_t xb=(size_t)total*D*sizeof(float), ib=(size_t)total*I*sizeof(float);
     if(!reserve(&ctx->x,&ctx->x_cap,xb)||!reserve(&ctx->y,&ctx->y_cap,xb)||
@@ -2208,7 +2210,7 @@ extern "C" int coli_cuda_expert_group(ColiCudaTensor *const *gates,
                                         ColiCudaTensor *const *downs,
                                         const int *rows, int count,
                                         float *y, const float *x) {
-    return expert_group_impl(gates,ups,downs,rows,count,y,x,0,0.f);
+    return expert_group_impl(gates,ups,downs,rows,count,y,x,0,0.f,0);
 }
 
 extern "C" int coli_cuda_expert_group_pinned(ColiCudaTensor *const *gates,
@@ -2217,7 +2219,7 @@ extern "C" int coli_cuda_expert_group_pinned(ColiCudaTensor *const *gates,
                                                const int *rows, int count,
                                                float *y, const float *x,
                                                int pin_small_batch) {
-    return expert_group_impl(gates,ups,downs,rows,count,y,x,pin_small_batch,0.f);
+    return expert_group_impl(gates,ups,downs,rows,count,y,x,pin_small_batch,0.f,0);
 }
 
 extern "C" int coli_cuda_expert_group_clamped(ColiCudaTensor *const *gates,
@@ -2227,7 +2229,17 @@ extern "C" int coli_cuda_expert_group_clamped(ColiCudaTensor *const *gates,
                                                float *y, const float *x,
                                                float swiglu_limit) {
     if (!(swiglu_limit > 0.f) || !std::isfinite(swiglu_limit)) return 0;
-    return expert_group_impl(gates,ups,downs,rows,count,y,x,0,swiglu_limit);
+    return expert_group_impl(gates,ups,downs,rows,count,y,x,0,swiglu_limit,0);
+}
+
+extern "C" int coli_cuda_expert_group_clamped_resident(ColiCudaTensor *const *gates,
+                                                        ColiCudaTensor *const *ups,
+                                                        ColiCudaTensor *const *downs,
+                                                        const int *rows, int count,
+                                                        float *y, const float *x,
+                                                        float swiglu_limit) {
+    if (!(swiglu_limit > 0.f) || !std::isfinite(swiglu_limit)) return 0;
+    return expert_group_impl(gates,ups,downs,rows,count,y,x,0,swiglu_limit,1);
 }
 
 /* GLM-5.3 streams routed int4 experts through host memory.  This variant
@@ -2298,7 +2310,7 @@ extern "C" int coli_cuda_expert_group_host_clamped(
     }
     ColiCudaTensor *gp[64],*up[64],*dp[64];
     for(int c=0;c<count;c++){gp[c]=&tg[c];up[c]=&tu[c];dp[c]=&td[c];}
-    int ok=expert_group_impl(gp,up,dp,rows,count,y,x,0,swiglu_limit);
+    int ok=expert_group_impl(gp,up,dp,rows,count,y,x,0,swiglu_limit,0);
     if(!ok) (void)cudaStreamSynchronize(ctx->stream);
     return ok;
 }

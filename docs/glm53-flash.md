@@ -154,6 +154,14 @@ measured from available memory when unset), `GLM53_MAX_IMAGE_TOKENS`,
 enables dense/shared CUDA matrices and clamped grouped int4 routed experts.
 `COLI_CUDA_EXPERT_GB` bounds transient expert staging (default 8 GiB), while
 `COLI_CUDA_EXPERT_MIN_ROWS` (default 32) leaves small decode groups on CPU.
+
+`COLI_CUDA_RESIDENT_EXPERT_GB` enables a separate persistent hot-expert tier.
+It ranks `(layer,eid)` pairs from the loaded `.coli_usage` history, uploads complete
+gate/up/down grouped-int4 triples once at startup, and serves matching routed rows with
+the existing clamped-SwiGLU CUDA group kernel without retransferring expert weights.
+`COLI_CUDA_RESIDENT_RESERVE_GB` (default 3 GB) remains free for lazily uploaded dense
+weights, activations, KV state, and scratch. The transient staging path and CPU path stay
+as fallbacks for cold experts or CUDA refusal.
 Both paths keep the CPU fallback available.
 
 ## Tests

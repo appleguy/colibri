@@ -220,6 +220,14 @@ COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_clamped(ColiCudaTensor *const *ga
                            ColiCudaTensor *const *downs,
                            const int *rows, int count,
                            float *y, const float *x, float swiglu_limit);
+/* Same grouped-int4 operation for tensors proven resident before the call.
+ * Skips the device-wide lazy-upload barrier used by the generic clamped path. */
+COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_clamped_resident(
+                           ColiCudaTensor *const *gates,
+                           ColiCudaTensor *const *ups,
+                           ColiCudaTensor *const *downs,
+                           const int *rows, int count,
+                           float *y, const float *x, float swiglu_limit);
 /* Host streamed GLM int4 blocks: weights/scales are copied into reusable
  * bounded CUDA scratch, then dispatched with the model's clamped SwiGLU. */
 COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_host_clamped(

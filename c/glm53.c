@@ -2107,7 +2107,7 @@ static int cuda_resident_moe(GModel *m, int layer,
             groups++;
         }
 
-        if (groups && !coli_cuda_expert_group_clamped(
+        if (groups && !coli_cuda_expert_group_clamped_resident(
                 gate, up, down, rows, groups, tmp, xg, m->c.swiglu_limit)) {
             ok = 0;
             break;
@@ -4048,6 +4048,20 @@ static void hits_emit(GModel *m) {
     for (int b = 0; b < nb; b++) { hex[w++] = "0123456789abcdef"[bm[b] >> 4]; hex[w++] = "0123456789abcdef"[bm[b] & 15]; }
     hex[w] = 0;
     serve_line("HITS %d %d %s\n", rows, cols, hex); free(hex); free(bm);
+#ifdef COLI_CUDA
+    if (m->gpu_expert_count &&
+        (getenv("PROF") || getenv("GLM53_VERBOSE") || getenv("COLI_CUDA_PROFILE"))) {
+        fprintf(stderr,
+                "[CUDA] GLM53 hot tier cumulative: %d experts %.2f GiB VRAM | "
+                "%llu grouped calls %llu routed rows %llu expert hits | %llu fallbacks\n",
+                m->gpu_expert_count,
+                m->gpu_expert_vram / (double)(1ull << 30),
+                (unsigned long long)m->gpu_expert_calls,
+                (unsigned long long)m->gpu_expert_rows,
+                (unsigned long long)m->gpu_expert_hits,
+                (unsigned long long)m->gpu_expert_fallback);
+    }
+#endif
 }
 
 static void serve_loop(GModel *m, Tok *tokenizer) {
