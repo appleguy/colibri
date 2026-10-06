@@ -2370,6 +2370,45 @@ static int gpu_expert_candidate_cmp(const void *ap, const void *bp) {
     return a->eid - b->eid;
 }
 
+static int gpu_expert_candidate_layer_cmp(const void *ap, const void *bp) {
+    const GpuExpertCandidate *a = (const GpuExpertCandidate *)ap;
+    const GpuExpertCandidate *b = (const GpuExpertCandidate *)bp;
+    if (a->layer != b->layer) return a->layer - b->layer;
+    if (a->heat != b->heat) return a->heat < b->heat ? 1 : -1;
+    return a->eid - b->eid;
+}
+
+static int gpu_expert_candidate_fair_order(
+        GpuExpertCandidate *cand, size_t nc, int from, int end) {
+    const int layers = end - from;
+    if (!cand || !nc || layers <= 0) return 0;
+    GpuExpertCandidate *fair = malloc(nc * sizeof(*fair));
+    size_t *start = malloc((size_t)layers * sizeof(*start));
+    size_t *count = calloc((size_t)layers, sizeof(*count));
+    if (!fair || !start || !count) {
+        free(fair); free(start); free(count);
+        return 0;
+    }
+    qsort(cand, nc, sizeof(*cand), gpu_expert_candidate_layer_cmp);
+    for (size_t i = 0; i < nc; i++) {
+        const int li = cand[i].layer - from;
+        if (li < 0 || li >= layers) continue;
+        if (!count[li]) start[li] = i;
+        count[li]++;
+    }
+    size_t out = 0;
+    for (size_t rank = 0; out < nc; rank++) {
+        const size_t before = out;
+        for (int li = 0; li < layers; li++)
+            if (rank < count[li]) fair[out++] = cand[start[li] + rank];
+        if (out == before) break;
+    }
+    const int ok = out == nc;
+    if (ok) memcpy(cand, fair, nc * sizeof(*cand));
+    free(fair); free(start); free(count);
+    return ok;
+}
+
 static void gpu_expert_free(GpuExpert *e) {
     if (!e) return;
     if (e->g) coli_cuda_tensor_free(e->g);
@@ -2463,7 +2502,18 @@ static void cuda_resident_expert_init(GModel *m) {
         free(cand);
         return;
     }
-    qsort(cand, nc, sizeof(*cand), gpu_expert_candidate_cmp);
+    const char *fair_setting = getenv("COLI_CUDA_RESIDENT_LAYER_FAIR");
+    const int fair_mode = fair_setting && *fair_setting && atoi(fair_setting) != 0;
+    if (fair_mode) {
+        if (!gpu_expert_candidate_fair_order(cand, nc, from, m->layer_end)) {
+            fprintf(stderr, "[CUDA] resident fair ordering unavailable; using global heat order\n");
+            qsort(cand, nc, sizeof(*cand), gpu_expert_candidate_cmp);
+        } else {
+            fprintf(stderr, "[CUDA] resident expert admission: fair per-layer interleave enabled\n");
+        }
+    } else {
+        qsort(cand, nc, sizeof(*cand), gpu_expert_candidate_cmp);
+    }
 
     const size_t registry_n = (size_t)m->c.n_layers * (size_t)m->c.n_experts;
     m->gpu_expert = calloc(registry_n, sizeof(*m->gpu_expert));
