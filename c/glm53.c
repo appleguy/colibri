@@ -3398,6 +3398,10 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
         fprintf(stderr, "OOM allocating forward-pass temporaries\n"); exit(1);
     }
 
+#ifdef COLI_CUDA
+    float *resident_streams_dev = NULL;
+    int resident_streams_valid = 0;
+#endif
     for (int i = begin; i < end; i++) {
         GLayer *l = &m->layer[i];
         for (int site = 0; site < 2; site++) {
@@ -3413,55 +3417,46 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                     site ? l->post_ln : l->in_ln, D, c->eps);
 #ifdef COLI_CUDA
             /* Qualification-only site-entry path. CPU pre/norm stays
-             * authoritative; CUDA recomputes real GLM geometry and reports
-             * drift before we allow the residual stream to remain resident. */
-            if (!site && c->is_full[i] && chain_mode == 2 && g_cuda_ready) {
-                const int mix_count = (2 + H) * H;
-                const int flat = H * D;
-                const size_t residual_b = (size_t)n * flat * sizeof(float);
-                const size_t fn_b = (size_t)mix_count * flat * sizeof(float);
+             * authoritative; the device path uses resident site weights and
+             * keeps residual/post/comb/normed buffers reusable by the rest of
+             * this site. */
+            float *chain_residual_dev = NULL, *chain_post_dev = NULL;
+            float *chain_comb_dev = NULL, *chain_normed_dev = NULL;
+            int chain_pre_ok = 0;
+            if (chain_mode == 2 && g_cuda_ready && cuda_hc_site_prepare(m, l, site)) {
+                const size_t residual_b = (size_t)n * H * D * sizeof(float);
                 const size_t post_b = (size_t)n * H * sizeof(float);
                 const size_t comb_b = (size_t)n * H * H * sizeof(float);
                 const size_t collapsed_b = (size_t)n * D * sizeof(float);
-                float *pre_input_dev = coli_cuda_pipe_scratch(g_cuda_device, 8, residual_b);
-                float *pre_fn_dev = coli_cuda_pipe_scratch(g_cuda_device, 9, fn_b);
-                float *pre_scale_dev = coli_cuda_pipe_scratch(g_cuda_device, 10, 3 * sizeof(float));
-                float *pre_base_dev = coli_cuda_pipe_scratch(g_cuda_device, 11,
-                                                              (size_t)mix_count * sizeof(float));
-                float *pre_collapsed_dev = coli_cuda_pipe_scratch(g_cuda_device, 12, collapsed_b);
-                float *pre_post_dev = coli_cuda_pipe_scratch(g_cuda_device, 13, post_b);
-                float *pre_comb_dev = coli_cuda_pipe_scratch(g_cuda_device, 14, comb_b);
-                float *pre_norm_w_dev = coli_cuda_pipe_scratch(g_cuda_device, 15,
-                                                                (size_t)D * sizeof(float));
-                float *pre_normed_dev = coli_cuda_pipe_scratch(g_cuda_device, 16, collapsed_b);
-                const float *norm_w = l->in_ln;
-                int pre_ok = pre_input_dev && pre_fn_dev && pre_scale_dev && pre_base_dev &&
-                             pre_collapsed_dev && pre_post_dev && pre_comb_dev &&
-                             pre_norm_w_dev && pre_normed_dev &&
-                             coli_cuda_pipe_upload(g_cuda_device, pre_input_dev,
-                                                   streams, residual_b) &&
-                             coli_cuda_pipe_upload(g_cuda_device, pre_fn_dev, fn, fn_b) &&
-                             coli_cuda_pipe_upload(g_cuda_device, pre_scale_dev, scale,
-                                                   3 * sizeof(float)) &&
-                             coli_cuda_pipe_upload(g_cuda_device, pre_base_dev, base,
-                                                   (size_t)mix_count * sizeof(float)) &&
-                             coli_cuda_pipe_upload(g_cuda_device, pre_norm_w_dev, norm_w,
-                                                   (size_t)D * sizeof(float)) &&
-                             coli_cuda_pipe_hc_pre(g_cuda_device, pre_collapsed_dev,
-                                                   pre_post_dev, pre_comb_dev,
-                                                   pre_input_dev, pre_fn_dev,
-                                                   pre_scale_dev, pre_base_dev,
-                                                   n, H, D, c->hc_iters, c->eps, c->hc_eps) &&
-                             coli_cuda_pipe_rmsnorm(g_cuda_device, pre_normed_dev,
-                                                    pre_collapsed_dev, pre_norm_w_dev,
-                                                    n, D, c->eps) &&
-                             coli_cuda_pipe_download(g_cuda_device, pre_normed_dev,
-                                                     chain_pre_norm_verify, collapsed_b) &&
-                             coli_cuda_pipe_download(g_cuda_device, pre_post_dev,
-                                                     chain_pre_post_verify, post_b) &&
-                             coli_cuda_pipe_download(g_cuda_device, pre_comb_dev,
-                                                     chain_pre_comb_verify, comb_b);
-                if (pre_ok) {
+                const int pre_uses_resident = site && resident_streams_valid;
+                chain_residual_dev = pre_uses_resident ? resident_streams_dev :
+                    coli_cuda_pipe_scratch(g_cuda_device, 0, residual_b);
+                float *pre_collapsed_dev = coli_cuda_pipe_scratch(g_cuda_device, 1, collapsed_b);
+                chain_post_dev = coli_cuda_pipe_scratch(g_cuda_device, 2, post_b);
+                chain_comb_dev = coli_cuda_pipe_scratch(g_cuda_device, 3, comb_b);
+                chain_normed_dev = coli_cuda_pipe_scratch(g_cuda_device, 4, collapsed_b);
+                chain_pre_ok = chain_residual_dev && pre_collapsed_dev &&
+                               chain_post_dev && chain_comb_dev && chain_normed_dev &&
+                               (pre_uses_resident ||
+                                coli_cuda_pipe_upload(g_cuda_device, chain_residual_dev,
+                                                      streams, residual_b)) &&
+                               coli_cuda_pipe_hc_pre(
+                                   g_cuda_device, pre_collapsed_dev,
+                                   chain_post_dev, chain_comb_dev, chain_residual_dev,
+                                   (const float *)l->hc_fn_cuda[site],
+                                   (const float *)l->hc_scale_cuda[site],
+                                   (const float *)l->hc_base_cuda[site],
+                                   n, H, D, c->hc_iters, c->eps, c->hc_eps) &&
+                               coli_cuda_pipe_rmsnorm(
+                                   g_cuda_device, chain_normed_dev, pre_collapsed_dev,
+                                   (const float *)l->hc_norm_cuda[site], n, D, c->eps) &&
+                               coli_cuda_pipe_download(g_cuda_device, chain_normed_dev,
+                                                       chain_pre_norm_verify, collapsed_b) &&
+                               coli_cuda_pipe_download(g_cuda_device, chain_post_dev,
+                                                       chain_pre_post_verify, post_b) &&
+                               coli_cuda_pipe_download(g_cuda_device, chain_comb_dev,
+                                                       chain_pre_comb_verify, comb_b);
+                if (chain_pre_ok) {
                     float max_norm_abs = 0.0f, max_norm_rel = 0.0f;
                     float max_post_abs = 0.0f, max_comb_abs = 0.0f;
                     for (size_t q = 0; q < (size_t)n * D; q++) {
@@ -3481,35 +3476,23 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                     static int pre_reports = 0;
                     if (pre_reports < 16) {
                         fprintf(stderr,
-                                "[CUDA] GLM53 pre+norm verify layer=%d start=%d n=%d "
-                                "norm_abs=%.6g norm_rel=%.6g post_abs=%.6g comb_abs=%.6g\n",
-                                i, start, n, max_norm_abs, max_norm_rel,
+                                "[CUDA] GLM53 pre+norm verify layer=%d site=%d start=%d n=%d "
+                                "resident_in=%d norm_abs=%.6g norm_rel=%.6g post_abs=%.6g comb_abs=%.6g\n",
+                                i, site, start, n, pre_uses_resident,
+                                max_norm_abs, max_norm_rel,
                                 max_post_abs, max_comb_abs);
                         pre_reports++;
                     }
                 }
             }
-            float *chain_branch_dev = NULL, *chain_residual_dev = NULL;
-            float *chain_post_dev = NULL, *chain_comb_dev = NULL, *chain_next_dev = NULL;
+            float *chain_branch_dev = NULL, *chain_next_dev = NULL;
             int chain_ready = 0;
-            if (!site && c->is_full[i] && chain_mode == 2 && g_cuda_ready) {
+            if (!site && c->is_full[i] && chain_pre_ok) {
                 const size_t branch_b = (size_t)n * D * sizeof(float);
                 const size_t residual_b = (size_t)n * H * D * sizeof(float);
-                const size_t post_b = (size_t)n * H * sizeof(float);
-                const size_t comb_b = (size_t)n * H * H * sizeof(float);
-                chain_branch_dev = coli_cuda_pipe_scratch(g_cuda_device, 0, branch_b);
-                chain_residual_dev = coli_cuda_pipe_scratch(g_cuda_device, 1, residual_b);
-                chain_post_dev = coli_cuda_pipe_scratch(g_cuda_device, 2, post_b);
-                chain_comb_dev = coli_cuda_pipe_scratch(g_cuda_device, 3, comb_b);
-                chain_next_dev = coli_cuda_pipe_scratch(g_cuda_device, 4, residual_b);
-                chain_ready = chain_branch_dev && chain_residual_dev && chain_post_dev &&
-                              chain_comb_dev && chain_next_dev &&
-                              coli_cuda_pipe_upload(g_cuda_device, chain_residual_dev,
-                                                    streams, residual_b) &&
-                              coli_cuda_pipe_upload(g_cuda_device, chain_post_dev,
-                                                    post, post_b) &&
-                              coli_cuda_pipe_upload(g_cuda_device, chain_comb_dev,
-                                                    comb, comb_b);
+                chain_branch_dev = coli_cuda_pipe_scratch(g_cuda_device, 8, branch_b);
+                chain_next_dev = coli_cuda_pipe_scratch(g_cuda_device, 9, residual_b);
+                chain_ready = chain_branch_dev && chain_next_dev;
             }
 #endif
             const double t_phase = now_s();
@@ -3564,6 +3547,10 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                                  streams + (size_t)t * H * D, post + (size_t)t * H,
                                  comb + (size_t)t * H * H, H, D);
                 post_done = 1;
+                if (gpu_post_ok) {
+                    resident_streams_dev = chain_next_dev;
+                    resident_streams_valid = 1;
+                }
                 if (gpu_post_ok && coli_cuda_pipe_download(
                         g_cuda_device, chain_next_dev, chain_verify,
                         (size_t)n * H * D * sizeof(float))) {
@@ -3591,6 +3578,9 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                                  streams + (size_t)t * H * D, post + (size_t)t * H,
                                  comb + (size_t)t * H * H, H, D);
             float *swap = streams; streams = next; next = swap;
+#ifdef COLI_CUDA
+            if (site) resident_streams_valid = 0;
+#endif
         }
     }
     free(chain_pre_comb_verify);
