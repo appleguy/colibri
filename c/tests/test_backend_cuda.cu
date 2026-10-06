@@ -515,6 +515,18 @@ int main(int argc, char **argv) {
         std::fprintf(stderr,"absorbed sparse CUDA attention mismatch\n");
         return 1;
     }
+    constexpr int AO=AH*AV;
+    float opw[AO*AO]={0}, aproj[AS*AO];
+    for(int i=0;i<AO;i++)opw[i*AO+i]=1.f;
+    ColiCudaTensor *opt=nullptr;
+    if(!coli_cuda_tensor_upload_g(&opt,opw,nullptr,0,AO,AO,d0,0)||
+       !coli_cuda_attention_absorbed_sparse_project_batch(
+            avt,opt,aproj,aqa,ala,asel,AS,AH,AV,AK,AT,AW,.5f)||
+       !close_enough(aproj,agpu,AS*AO)){
+        std::fprintf(stderr,"absorbed sparse CUDA attention+projection mismatch\n");
+        return 1;
+    }
+    coli_cuda_tensor_free(opt);
     coli_cuda_tensor_free(avt);
 
     /* Native s4 WMMA path: compare the quantized-activation result against the

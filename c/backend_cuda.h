@@ -279,6 +279,12 @@ COLI_CUDA_DLLEXPORT int coli_cuda_attention_absorbed_sparse_batch(
         ColiCudaTensor *v_proj,float *ctx,const float *q_abs,
         const float *latent,const int *selected,int S,int H,int V,int K,
         int T,int width,float attention_scale);
+/* Sparse absorbed attention followed by a resident o_proj on the same device.
+ * Only the final [S,O] hidden output crosses back to host. */
+COLI_CUDA_DLLEXPORT int coli_cuda_attention_absorbed_sparse_project_batch(
+        ColiCudaTensor *v_proj,ColiCudaTensor *o_proj,float *out,
+        const float *q_abs,const float *latent,const int *selected,
+        int S,int H,int V,int K,int T,int width,float attention_scale);
 
 COLI_CUDA_DLLEXPORT void coli_cuda_tensor_free(ColiCudaTensor *tensor);
 COLI_CUDA_DLLEXPORT size_t coli_cuda_tensor_bytes(const ColiCudaTensor *tensor);

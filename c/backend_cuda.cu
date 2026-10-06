@@ -2566,6 +2566,45 @@ extern "C" int coli_cuda_attention_absorbed_sparse_batch(
     return 1;
 }
 
+extern "C" int coli_cuda_attention_absorbed_sparse_project_batch(
+        ColiCudaTensor *v_proj,ColiCudaTensor *o_proj,float *out,
+        const float *q_abs,const float *latent,const int *selected,
+        int S,int H,int V,int K,int T,int width,float scale){
+    if(fault_injected())return 0;
+    if(!absorb_fmt_ok(v_proj)||!o_proj||!out||!q_abs||!latent||!selected||
+       S<1||H<1||V<1||K<1||K>512||T<1||width<1||width>4096||
+       v_proj->I!=K||v_proj->O!=H*V||o_proj->device!=v_proj->device||
+       o_proj->I!=H*V)return 0;
+    DeviceContext *dc=find_ctx(v_proj->device);if(!select_ctx(dc))return 0;
+    size_t qb=(size_t)S*H*K*sizeof(float),lb=(size_t)T*K*sizeof(float);
+    size_t sb=(size_t)S*width*sizeof(int),cb=(size_t)S*H*V*sizeof(float);
+    size_t ob=(size_t)S*o_proj->O*sizeof(float);
+    if(!reserve(&dc->aq,&dc->aq_cap,qb)||!reserve(&dc->al,&dc->al_cap,lb)||
+       !reserve_bytes((void**)&dc->asel,&dc->asel_cap,sb)||
+       !reserve(&dc->ac,&dc->ac_cap,cb)||!reserve(&dc->y,&dc->y_cap,ob))
+        return 0;
+    if(!cuda_ok(cudaMemcpyAsync(dc->aq,q_abs,qb,cudaMemcpyHostToDevice,dc->stream),
+                "absorbed sparse q upload")||
+       !cuda_ok(cudaMemcpyAsync(dc->al,latent,lb,cudaMemcpyHostToDevice,dc->stream),
+                "absorbed sparse latent upload")||
+       !cuda_ok(cudaMemcpyAsync(dc->asel,selected,sb,cudaMemcpyHostToDevice,dc->stream),
+                "absorbed sparse selection upload"))return 0;
+    size_t shared=(size_t)(width+256+K)*sizeof(float);
+    attention_absorbed_sparse_kernel<<<dim3((unsigned)H,(unsigned)S),256,shared,dc->stream>>>(
+        dc->ac,dc->aq,dc->al,dc->asel,v_proj->weights,v_proj->scales,v_proj->fmt,
+        S,H,V,K,T,width,scale,v_proj->gs,v_proj->ng);
+    if(!cuda_ok(cudaGetLastError(),"absorbed sparse attention launch"))return 0;
+    quant_matmul<<<dim3(o_proj->O,S),256,0,dc->stream>>>(
+        dc->y,dc->ac,o_proj->weights,o_proj->scales,o_proj->fmt,S,o_proj->I,o_proj->O,
+        row_bytes(o_proj->fmt,o_proj->I),o_proj->gs,o_proj->ng);
+    if(!cuda_ok(cudaGetLastError(),"absorbed sparse o_proj launch")||
+       !cuda_ok(cudaMemcpyAsync(out,dc->y,ob,cudaMemcpyDeviceToHost,dc->stream),
+                "absorbed sparse projected output download")||
+       !cuda_ok(cudaStreamSynchronize(dc->stream),"absorbed sparse project synchronize"))
+        return 0;
+    return 1;
+}
+
 extern "C" int coli_cuda_attention_absorb(ColiCudaTensor *w,float *ctx,const float *q,
                                             const float *latent,const float *rope,int H,int Q,
                                             int R,int V,int K,int T,float scale){
