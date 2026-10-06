@@ -641,6 +641,8 @@ static double g_cuda_resident_reserve_gb = 3.0;
 static uint64_t g_cuda_moe_calls = 0;
 static uint64_t g_cuda_moe_rows = 0;
 static uint64_t g_cuda_moe_fallback = 0;
+static uint64_t g_cuda_attn_attempts = 0, g_cuda_attn_success = 0, g_cuda_attn_fallback = 0;
+static double g_cuda_attn_seconds = 0.0;
 static int g_cuda_moe_reported = 0;
 static int g_cuda_moe_small_reported = 0;
 #endif
@@ -1270,10 +1272,15 @@ static void mla_layer(const Cfg *c, const GLayer *l, const float *x, int tokens,
         GLayer *mutable_l = (GLayer *)l;
         cuda_context = malloc((size_t)tokens * H * V * sizeof(*cuda_context));
         if (!cuda_context) { fprintf(stderr, "OOM allocating CUDA MLA verify context\n"); exit(1); }
+        g_cuda_attn_attempts++;
+        const double cuda_attn_t0 = omp_get_wtime();
         if (cuda_mat_ensure(&mutable_l->kvb_v))
             cuda_attn_ok = coli_cuda_attention_absorbed_sparse_batch(
                 (ColiCudaTensor *)mutable_l->kvb_v.cuda, cuda_context, absorbed,
                 latent, selected, tokens, H, V, L, seen, width, scale);
+        g_cuda_attn_seconds += omp_get_wtime() - cuda_attn_t0;
+        if (cuda_attn_ok) g_cuda_attn_success++;
+        else g_cuda_attn_fallback++;
         if (cuda_attn_mode == 1 && cuda_attn_ok) {
             for (int t = 0; t < tokens; t++)
                 mv(out + (size_t)t * c->hidden, &l->o,
@@ -4153,6 +4160,15 @@ static void hits_emit(GModel *m) {
     hex[w] = 0;
     serve_line("HITS %d %d %s\n", rows, cols, hex); free(hex); free(bm);
 #ifdef COLI_CUDA
+    if (g_cuda_attn_attempts &&
+        (getenv("PROF") || getenv("GLM53_VERBOSE") || getenv("COLI_CUDA_PROFILE"))) {
+        fprintf(stderr,
+                "[CUDA] GLM53 MLA cumulative: %llu attempts %llu success %llu fallback | %.3f s GPU wall\n",
+                (unsigned long long)g_cuda_attn_attempts,
+                (unsigned long long)g_cuda_attn_success,
+                (unsigned long long)g_cuda_attn_fallback,
+                g_cuda_attn_seconds);
+    }
     if (m->gpu_expert_count &&
         (getenv("PROF") || getenv("GLM53_VERBOSE") || getenv("COLI_CUDA_PROFILE"))) {
         fprintf(stderr,
