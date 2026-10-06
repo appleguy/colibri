@@ -3178,7 +3178,9 @@ extern "C" int coli_cuda_pipe_upload(int device,void *dst,const void *src,size_t
 }
 extern "C" int coli_cuda_pipe_download(int device,const void *src,void *dst,size_t bytes){
     DeviceContext *ctx=find_ctx(device); if(!select_ctx(ctx)) return 0;
-    return cuda_ok(cudaMemcpy(dst,src,bytes,cudaMemcpyDeviceToHost),"pipe download");
+    return cuda_ok(cudaMemcpyAsync(dst,src,bytes,cudaMemcpyDeviceToHost,ctx->stream),
+                   "pipe download") &&
+           cuda_ok(cudaStreamSynchronize(ctx->stream),"pipe download synchronize");
 }
 extern "C" int coli_cuda_pipe_rmsnorm(int device,float *y_dev,const float *x_dev,
                                       const float *w_dev,int S,int D,float eps){
