@@ -106,9 +106,10 @@ Completed checkpoints:
 - `9bee6c1f` adds `coli_cuda_pipe_swiglu_clamped`, matching GLM-5.3's asymmetric SwiGLU contract exactly: positive-only gate clamp, symmetric up clamp, then SiLU(gate)×up. CUDA numerical parity, Linux loader/header parity, and native-Windows ABI (`57 mandatory + 9 optional`) all pass. This is the prerequisite for moving the always-on shared expert onto the resident device row without changing model math.
 - `2351d9d1` completes the S=1 **shared expert from resident device row** verification path: resident `rg/ru/rd` matrices run `pipe_gemm -> pipe_gemm -> pipe_swiglu_clamped -> pipe_gemm` from `x_dev`, then one D-row is downloaded and compared with the existing host shared-expert result. CPU and CUDA-linked GLM builds pass; host output remains authoritative until real-run parity.
 - `2812d439` refactors the shared-expert helper to **retain its D-row contribution on-device** and moves the verification download to the caller. Numerics are unchanged, CPU/CUDA-linked GLM builds pass, and the device row is now composable with routed-expert contributions before mHC post.
+- `9959c261` mirrors that refactor for the S=1 resident routed-expert helper: it now returns its device accumulator, while the caller performs the verification download. CPU/CUDA-linked GLM builds pass; CPU output remains authoritative.
 
 Work:
-- refactor the resident-routed verification helper to retain its D-row contribution on device so it can be summed with the shared expert before mHC post;
+- sum the shared and resident-routed device D-row contributions before mHC post under verification mode;
 - after real-run parity, make the shared expert and device-row resident routed-expert contributions authoritative and avoid their host activation staging;
 - preserve residual stream across layer boundaries;
 - replace broad synchronizations with dependency-local synchronization.
