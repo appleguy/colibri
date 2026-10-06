@@ -350,3 +350,13 @@ Resume WRX80 native-Windows GLM-5.3 optimization from `docs/experiments/wrx80-gl
 - Evidence: `E:\\z-results\\glm53-native-2026-10-06\\chain1-validation\\cuda-dll-build-manual.log` ends with `CUDA_DLL_BUILD_PASS`.
 - Only existing nvcc warnings were observed; no new compiler/linker error.
 - ACTIVE next action: U00.3, build CUDA-linked native `glm53.exe`, then run the RTX backend numerical suite and loader fixture. Do not commit `c/glm53.c` until those gates pass.
+
+
+### U00.3 remaining validation gates — PASS
+
+- CUDA-linked native `glm53.exe` build PASSED in the isolated worktree. Evidence: `E:\\z-results\\glm53-native-2026-10-06\\chain1-validation\\cuda-glm-build-manual.log`.
+- RTX backend numerical binary PASSED directly with exit code 0: `q8/q4/q2/f32/e8 correctness ok on 1 device(s)`. Evidence: `backend-test-direct.log`.
+- The first `make cuda-test` wrapper attempt was not a numerical failure: PowerShell `$ErrorActionPreference=Stop` promoted the test's normal `[CUDA] device 0...` stderr banner into a `NativeCommandError`. Direct execution proved the binary itself passes.
+- Loader stub fixture initially skipped because the direct Python command lacked w64devkit `gcc`/`objdump` on PATH. Rerun with explicit w64devkit PATH executed the intended fixture: **12/12 tests PASS** in 4.425 s. Evidence: `loader-test-direct.log`.
+- U00 validation is now complete: diff check, CPU build, CUDA DLL build, CUDA-linked GLM build, RTX numerical suite, and loader ABI fixture all pass.
+- ACTIVE next action: U00.4, verify the main-checkout `c/glm53.c` diff is byte/semantic-equivalent to the validated isolated-worktree patch, commit only that source file, push, then checkpoint docs and advance the cursor to U01 CHAIN=2 short requalification.

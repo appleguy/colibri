@@ -589,3 +589,8 @@ The staged conservative CHAIN=1 source passed the isolated native CPU build. The
 ### U00.2 checkpoint — CUDA DLL build PASS
 
 The staged CHAIN=1 step-1 source now passes both the isolated CPU build and isolated CUDA DLL build. Next gate is CUDA-linked `glm53.exe`, followed by RTX backend numerical tests and loader ABI fixture before source commit.
+
+
+### U00.3 checkpoint — full isolated validation PASS
+
+The conservative CHAIN=1 step-1 source passed the complete isolated validation ladder: native CPU build, CUDA DLL build, CUDA-linked `glm53.exe`, RTX q8/q4/q2/f32/e8 numerical test, and the 12-case Windows loader ABI fixture. The earlier CUDA-test wrapper error was PowerShell stderr handling, not a test failure. Next unit is source-only commit/push of the validated `c/glm53.c` change after confirming the main checkout matches the validated worktree patch.
