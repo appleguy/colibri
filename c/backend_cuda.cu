@@ -1187,6 +1187,18 @@ static int reserve(float **ptr, size_t *cap, size_t bytes) {
     return 1;
 }
 
+static int reserve_chunked(float **ptr,size_t *cap,size_t bytes,size_t quantum){
+    if(*cap>=bytes)return 1;
+    size_t target=bytes;
+    if(quantum){
+        if(bytes>SIZE_MAX-(quantum-1))return 0;
+        target=(bytes+quantum-1)/quantum*quantum;
+    }
+    if(*ptr)cudaFree(*ptr);*ptr=nullptr;*cap=0;
+    if(!cuda_ok(cudaMalloc(ptr,target),"chunked scratch allocation"))return 0;
+    *cap=target;return 1;
+}
+
 static int reserve_bytes(void **ptr,size_t *cap,size_t bytes){
     if(*cap>=bytes) return 1; if(*ptr) cudaFree(*ptr); *ptr=nullptr; *cap=0;
     if(!cuda_ok(cudaMalloc(ptr,bytes),"descriptor allocation")) return 0; *cap=bytes; return 1;
@@ -2633,7 +2645,8 @@ extern "C" int coli_cuda_attention_absorbed_sparse_project_batch_dev_out(
     DeviceContext *dc=find_ctx(v_proj->device);if(!select_ctx(dc))return 0;
     size_t qb=(size_t)S*H*K*sizeof(float),lb=(size_t)T*K*sizeof(float);
     size_t sb=(size_t)S*width*sizeof(int),cb=(size_t)S*H*V*sizeof(float);
-    if(!reserve(&dc->aq,&dc->aq_cap,qb)||!reserve(&dc->al,&dc->al_cap,lb)||
+    if(!reserve(&dc->aq,&dc->aq_cap,qb)||
+       !reserve_chunked(&dc->al,&dc->al_cap,lb,8ull<<20)||
        !reserve_bytes((void**)&dc->asel,&dc->asel_cap,sb)||
        !reserve(&dc->ac,&dc->ac_cap,cb))
         return 0;
