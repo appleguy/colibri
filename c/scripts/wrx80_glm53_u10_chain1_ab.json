@@ -1,0 +1,66 @@
+{
+  "repo": "E:\\z-src\\colibri-u01-chain2",
+  "model": "E:\\z-models\\GLM-5.3-Flash-colibri-int4-g64",
+  "results_root": "E:\\z-results\\glm53-native-2026-10-06\\u10-chain1",
+  "sample_interval_ms": 250,
+  "prompt_unit": "Analyze this deterministic systems-programming trace. Track ownership, synchronization, memory movement, cache residency, latency, throughput, and correctness. Explain interactions precisely. ",
+  "prompt_repeat": 20,
+  "prompt_chars": 3400,
+  "base_env": {
+    "OMP_NUM_THREADS": "16",
+    "COLI_CUDA": "1",
+    "COLI_CUDA_RESIDENT_EXPERT_GB": "18",
+    "COLI_CUDA_RESIDENT_RESERVE_GB": "3",
+    "GLM53_PREWARM_EXPERTS": "1",
+    "GLM53_EXPERT_GB": "175",
+    "GLM53_PROFILE_VRAM": "1",
+    "GLM53_PROF_EVERY": "1",
+    "PROF": "1",
+    "COLI_CUDA_GLM53_CHAIN": "1",
+    "COLI_CUDA_GLM53_ATTN": "1",
+    "COLI_CUDA_GLM53_ROUTER": "1",
+    "COLI_CUDA_GLM53_INDEXER": "1",
+    "COLI_CUDA_SPARSE_PROFILE": "0"
+  },
+  "runs": [
+    {
+      "name": "u10-chain1-fb61f73-global-g8",
+      "enabled": true,
+      "greedy": 8,
+      "env": {
+        "COLI_CUDA_RESIDENT_LAYER_FAIR": "0"
+      },
+      "require": [
+        "decode 8 token",
+        "GLM53 indexer authoritative q=.*ok=1",
+        "\\[STATS\\]"
+      ],
+      "forbid": [
+        "fallback=[1-9]",
+        "CUDA error",
+        "engine_error"
+      ],
+      "stop_on_failure": true
+    },
+    {
+      "name": "u10-chain1-fb61f73-fair-g8",
+      "enabled": false,
+      "note": "Enable only after the global CHAIN=1 result is preserved and reviewed.",
+      "greedy": 8,
+      "env": {
+        "COLI_CUDA_RESIDENT_LAYER_FAIR": "1"
+      },
+      "require": [
+        "decode 8 token",
+        "GLM53 indexer authoritative q=.*ok=1",
+        "\\[STATS\\]"
+      ],
+      "forbid": [
+        "fallback=[1-9]",
+        "CUDA error",
+        "engine_error"
+      ],
+      "stop_on_failure": true
+    }
+  ]
+}
