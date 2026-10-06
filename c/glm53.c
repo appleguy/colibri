@@ -686,6 +686,8 @@ typedef struct {
 #ifdef COLI_CUDA
     void *router_cuda, *rbias_cuda;       /* lazy f32 router residency for S=1 decode */
     unsigned char router_cuda_bad;
+    void *hc_fn_cuda[2], *hc_base_cuda[2], *hc_scale_cuda[2], *hc_norm_cuda[2];
+    unsigned char hc_cuda_bad[2];         /* lazy mHC + following norm residency */
 #endif
     Mat *eg, *eu, *ed;                    /* esperti routed */
 } GLayer;
@@ -799,6 +801,44 @@ static int cuda_chain_mode(void) {
     return 0;
 #endif
 }
+
+#ifdef COLI_CUDA
+static int cuda_hc_site_prepare(GModel *m, GLayer *l, int site) {
+    const Cfg *c=&m->c;
+    if(cuda_chain_mode()<=0||!g_cuda_ready||site<0||site>1||l->hc_cuda_bad[site])
+        return 0;
+    if(l->hc_fn_cuda[site]&&l->hc_base_cuda[site]&&l->hc_scale_cuda[site]&&
+       l->hc_norm_cuda[site]) return 1;
+
+    const int H=c->hc_mult,D=c->hidden,mix_count=(2+H)*H;
+    const float *fn=site?l->hc_ffn_fn:l->hc_attn_fn;
+    const float *base=site?l->hc_ffn_base:l->hc_attn_base;
+    const float *scale=site?l->hc_ffn_scale:l->hc_attn_scale;
+    const float *norm=site?l->post_ln:l->in_ln;
+    const size_t fn_b=(size_t)mix_count*H*D*sizeof(float);
+    const size_t base_b=(size_t)mix_count*sizeof(float);
+    const size_t scale_b=3*sizeof(float),norm_b=(size_t)D*sizeof(float);
+    void *fd=coli_cuda_pipe_alloc(g_cuda_device,fn_b);
+    void *bd=coli_cuda_pipe_alloc(g_cuda_device,base_b);
+    void *sd=coli_cuda_pipe_alloc(g_cuda_device,scale_b);
+    void *nd=coli_cuda_pipe_alloc(g_cuda_device,norm_b);
+    if(!fd||!bd||!sd||!nd||
+       !coli_cuda_pipe_upload(g_cuda_device,fd,fn,fn_b)||
+       !coli_cuda_pipe_upload(g_cuda_device,bd,base,base_b)||
+       !coli_cuda_pipe_upload(g_cuda_device,sd,scale,scale_b)||
+       !coli_cuda_pipe_upload(g_cuda_device,nd,norm,norm_b)){
+        if(fd)coli_cuda_pipe_free(g_cuda_device,fd);
+        if(bd)coli_cuda_pipe_free(g_cuda_device,bd);
+        if(sd)coli_cuda_pipe_free(g_cuda_device,sd);
+        if(nd)coli_cuda_pipe_free(g_cuda_device,nd);
+        l->hc_cuda_bad[site]=1;
+        return 0;
+    }
+    l->hc_fn_cuda[site]=fd; l->hc_base_cuda[site]=bd;
+    l->hc_scale_cuda[site]=sd; l->hc_norm_cuda[site]=nd;
+    return 1;
+}
+#endif
 
 static void profile_vram_sample(GModel *m) {
 #ifdef COLI_CUDA
@@ -3340,12 +3380,21 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
     const int chain_mode = cuda_chain_mode();
     float *chain_verify = chain_mode == 2
         ? malloc((size_t)n * H * D * sizeof(float)) : NULL;
+    float *chain_pre_norm_verify = chain_mode == 2
+        ? malloc((size_t)n * D * sizeof(float)) : NULL;
+    float *chain_pre_post_verify = chain_mode == 2
+        ? malloc((size_t)n * H * sizeof(float)) : NULL;
+    float *chain_pre_comb_verify = chain_mode == 2
+        ? malloc((size_t)n * H * H * sizeof(float)) : NULL;
 #else
     const int chain_mode = 0;
     float *chain_verify = NULL;
+    float *chain_pre_norm_verify = NULL, *chain_pre_post_verify = NULL;
+    float *chain_pre_comb_verify = NULL;
 #endif
     if (!collapsed || !normed || !branch || !post || !comb ||
-        (chain_mode == 2 && !chain_verify)) {
+        (chain_mode == 2 && (!chain_verify || !chain_pre_norm_verify ||
+                             !chain_pre_post_verify || !chain_pre_comb_verify))) {
         fprintf(stderr, "OOM allocating forward-pass temporaries\n"); exit(1);
     }
 
@@ -3363,6 +3412,83 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                 rms(normed + (size_t)t * D, collapsed + (size_t)t * D,
                     site ? l->post_ln : l->in_ln, D, c->eps);
 #ifdef COLI_CUDA
+            /* Qualification-only site-entry path. CPU pre/norm stays
+             * authoritative; CUDA recomputes real GLM geometry and reports
+             * drift before we allow the residual stream to remain resident. */
+            if (!site && c->is_full[i] && chain_mode == 2 && g_cuda_ready) {
+                const int mix_count = (2 + H) * H;
+                const int flat = H * D;
+                const size_t residual_b = (size_t)n * flat * sizeof(float);
+                const size_t fn_b = (size_t)mix_count * flat * sizeof(float);
+                const size_t post_b = (size_t)n * H * sizeof(float);
+                const size_t comb_b = (size_t)n * H * H * sizeof(float);
+                const size_t collapsed_b = (size_t)n * D * sizeof(float);
+                float *pre_input_dev = coli_cuda_pipe_scratch(g_cuda_device, 8, residual_b);
+                float *pre_fn_dev = coli_cuda_pipe_scratch(g_cuda_device, 9, fn_b);
+                float *pre_scale_dev = coli_cuda_pipe_scratch(g_cuda_device, 10, 3 * sizeof(float));
+                float *pre_base_dev = coli_cuda_pipe_scratch(g_cuda_device, 11,
+                                                              (size_t)mix_count * sizeof(float));
+                float *pre_collapsed_dev = coli_cuda_pipe_scratch(g_cuda_device, 12, collapsed_b);
+                float *pre_post_dev = coli_cuda_pipe_scratch(g_cuda_device, 13, post_b);
+                float *pre_comb_dev = coli_cuda_pipe_scratch(g_cuda_device, 14, comb_b);
+                float *pre_norm_w_dev = coli_cuda_pipe_scratch(g_cuda_device, 15,
+                                                                (size_t)D * sizeof(float));
+                float *pre_normed_dev = coli_cuda_pipe_scratch(g_cuda_device, 16, collapsed_b);
+                const float *norm_w = l->in_ln;
+                int pre_ok = pre_input_dev && pre_fn_dev && pre_scale_dev && pre_base_dev &&
+                             pre_collapsed_dev && pre_post_dev && pre_comb_dev &&
+                             pre_norm_w_dev && pre_normed_dev &&
+                             coli_cuda_pipe_upload(g_cuda_device, pre_input_dev,
+                                                   streams, residual_b) &&
+                             coli_cuda_pipe_upload(g_cuda_device, pre_fn_dev, fn, fn_b) &&
+                             coli_cuda_pipe_upload(g_cuda_device, pre_scale_dev, scale,
+                                                   3 * sizeof(float)) &&
+                             coli_cuda_pipe_upload(g_cuda_device, pre_base_dev, base,
+                                                   (size_t)mix_count * sizeof(float)) &&
+                             coli_cuda_pipe_upload(g_cuda_device, pre_norm_w_dev, norm_w,
+                                                   (size_t)D * sizeof(float)) &&
+                             coli_cuda_pipe_hc_pre(g_cuda_device, pre_collapsed_dev,
+                                                   pre_post_dev, pre_comb_dev,
+                                                   pre_input_dev, pre_fn_dev,
+                                                   pre_scale_dev, pre_base_dev,
+                                                   n, H, D, c->hc_iters, c->eps, c->hc_eps) &&
+                             coli_cuda_pipe_rmsnorm(g_cuda_device, pre_normed_dev,
+                                                    pre_collapsed_dev, pre_norm_w_dev,
+                                                    n, D, c->eps) &&
+                             coli_cuda_pipe_download(g_cuda_device, pre_normed_dev,
+                                                     chain_pre_norm_verify, collapsed_b) &&
+                             coli_cuda_pipe_download(g_cuda_device, pre_post_dev,
+                                                     chain_pre_post_verify, post_b) &&
+                             coli_cuda_pipe_download(g_cuda_device, pre_comb_dev,
+                                                     chain_pre_comb_verify, comb_b);
+                if (pre_ok) {
+                    float max_norm_abs = 0.0f, max_norm_rel = 0.0f;
+                    float max_post_abs = 0.0f, max_comb_abs = 0.0f;
+                    for (size_t q = 0; q < (size_t)n * D; q++) {
+                        float da = fabsf(chain_pre_norm_verify[q] - normed[q]);
+                        float dr = da / (fabsf(normed[q]) + 1e-6f);
+                        if (da > max_norm_abs) max_norm_abs = da;
+                        if (dr > max_norm_rel) max_norm_rel = dr;
+                    }
+                    for (size_t q = 0; q < (size_t)n * H; q++) {
+                        float da = fabsf(chain_pre_post_verify[q] - post[q]);
+                        if (da > max_post_abs) max_post_abs = da;
+                    }
+                    for (size_t q = 0; q < (size_t)n * H * H; q++) {
+                        float da = fabsf(chain_pre_comb_verify[q] - comb[q]);
+                        if (da > max_comb_abs) max_comb_abs = da;
+                    }
+                    static int pre_reports = 0;
+                    if (pre_reports < 16) {
+                        fprintf(stderr,
+                                "[CUDA] GLM53 pre+norm verify layer=%d start=%d n=%d "
+                                "norm_abs=%.6g norm_rel=%.6g post_abs=%.6g comb_abs=%.6g\n",
+                                i, start, n, max_norm_abs, max_norm_rel,
+                                max_post_abs, max_comb_abs);
+                        pre_reports++;
+                    }
+                }
+            }
             float *chain_branch_dev = NULL, *chain_residual_dev = NULL;
             float *chain_post_dev = NULL, *chain_comb_dev = NULL, *chain_next_dev = NULL;
             int chain_ready = 0;
@@ -3467,6 +3593,9 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
             float *swap = streams; streams = next; next = swap;
         }
     }
+    free(chain_pre_comb_verify);
+    free(chain_pre_post_verify);
+    free(chain_pre_norm_verify);
     free(chain_verify);
     free(comb); free(post); free(branch); free(normed); free(collapsed);
     return streams;
@@ -3507,6 +3636,12 @@ static void model_release(GModel *m) {
 #ifdef COLI_CUDA
             if (l->router_cuda) coli_cuda_pipe_free(g_cuda_device, l->router_cuda);
             if (l->rbias_cuda) coli_cuda_pipe_free(g_cuda_device, l->rbias_cuda);
+            for(int site=0;site<2;site++){
+                if(l->hc_fn_cuda[site]) coli_cuda_pipe_free(g_cuda_device,l->hc_fn_cuda[site]);
+                if(l->hc_base_cuda[site]) coli_cuda_pipe_free(g_cuda_device,l->hc_base_cuda[site]);
+                if(l->hc_scale_cuda[site]) coli_cuda_pipe_free(g_cuda_device,l->hc_scale_cuda[site]);
+                if(l->hc_norm_cuda[site]) coli_cuda_pipe_free(g_cuda_device,l->hc_norm_cuda[site]);
+            }
 #endif
             const float *vectors[] = { l->in_ln, l->post_ln, l->hc_attn_fn,
                                        l->hc_attn_base, l->hc_attn_scale,
