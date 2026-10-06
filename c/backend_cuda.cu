@@ -3001,6 +3001,103 @@ __global__ static void pipe_add_n(float *x,const float *t,size_t n){
     if(i<n) x[i]+=t[i];
 }
 
+static __device__ __forceinline__ float pipe_hc_sigmoid(float x){
+    if(x>=0.f){ float d=expf(-x); return 1.f/(1.f+d); }
+    float g=expf(x); return g/(1.f+g);
+}
+
+/* Fidelity-first mHC pre. Each scalar reduction keeps the CPU source order;
+ * CUDA parallelism is across independent tokens/rows/columns. */
+__global__ static void pipe_hc_inv_rms_kernel(float *inv,const float *input,
+                                              int S,int hc,int D,float eps){
+    int t=(int)blockIdx.x;
+    if(t>=S||threadIdx.x)return;
+    int flat=hc*D;
+    const float *x=input+(size_t)t*flat;
+    float ms=0.f;
+    for(int i=0;i<flat;i++) ms += x[i]*x[i];
+    inv[t]=1.f/sqrtf(ms/flat+eps);
+}
+__global__ static void pipe_hc_mix_kernel(float *mixes,const float *input,
+                                          const float *fn,const float *inv,
+                                          int S,int hc,int D){
+    int row=(int)blockIdx.x,t=(int)blockIdx.y;
+    if(t>=S||threadIdx.x)return;
+    int flat=hc*D,mix_count=(2+hc)*hc;
+    const float *x=input+(size_t)t*flat;
+    const float *w=fn+(size_t)row*flat;
+    float sum=0.f;
+    for(int col=0;col<flat;col++) sum += w[col]*x[col];
+    mixes[(size_t)t*mix_count+row]=sum*inv[t];
+}
+__global__ static void pipe_hc_sinkhorn_kernel(float *pre,float *post,float *comb,
+                                               const float *mixes,
+                                               const float *scale,const float *base,
+                                               int S,int hc,int iterations,float eps){
+    int t=(int)blockIdx.x;
+    if(t>=S||threadIdx.x)return;
+    int mix_count=(2+hc)*hc,matrix_offset=2*hc;
+    const float *mx=mixes+(size_t)t*mix_count;
+    float *pr=pre+(size_t)t*hc;
+    float *po=post+(size_t)t*hc;
+    float *co=comb+(size_t)t*hc*hc;
+    float sums[8];
+    for(int i=0;i<hc;i++){
+        pr[i]=pipe_hc_sigmoid(mx[i]*scale[0]+base[i])+eps;
+        po[i]=2.f*pipe_hc_sigmoid(mx[hc+i]*scale[1]+base[hc+i]);
+    }
+    for(int row=0;row<hc;row++){
+        float maximum=-INFINITY;
+        for(int col=0;col<hc;col++){
+            int idx=matrix_offset+row*hc+col;
+            float v=mx[idx]*scale[2]+base[idx];
+            co[row*hc+col]=v;
+            if(v>maximum)maximum=v;
+        }
+        float sum=0.f;
+        for(int col=0;col<hc;col++){
+            float v=expf(co[row*hc+col]-maximum);
+            co[row*hc+col]=v; sum+=v;
+        }
+        for(int col=0;col<hc;col++) co[row*hc+col]=co[row*hc+col]/sum+eps;
+    }
+    for(int col=0;col<hc;col++){
+        float sum=0.f;
+        for(int row=0;row<hc;row++) sum+=co[row*hc+col];
+        sums[col]=sum;
+    }
+    for(int row=0;row<hc;row++)
+        for(int col=0;col<hc;col++) co[row*hc+col]/=sums[col]+eps;
+    for(int it=1;it<iterations;it++){
+        for(int row=0;row<hc;row++){
+            float sum=0.f;
+            for(int col=0;col<hc;col++) sum+=co[row*hc+col];
+            sums[row]=sum;
+        }
+        for(int row=0;row<hc;row++)
+            for(int col=0;col<hc;col++) co[row*hc+col]/=sums[row]+eps;
+        for(int col=0;col<hc;col++){
+            float sum=0.f;
+            for(int row=0;row<hc;row++) sum+=co[row*hc+col];
+            sums[col]=sum;
+        }
+        for(int row=0;row<hc;row++)
+            for(int col=0;col<hc;col++) co[row*hc+col]/=sums[col]+eps;
+    }
+}
+__global__ static void pipe_hc_collapse_kernel(float *out,const float *input,
+                                               const float *pre,int S,int hc,int D){
+    int t=(int)blockIdx.x;
+    const float *x=input+(size_t)t*hc*D;
+    const float *pr=pre+(size_t)t*hc;
+    float *y=out+(size_t)t*D;
+    for(int col=threadIdx.x;col<D;col+=blockDim.x){
+        float sum=0.f;
+        for(int copy=0;copy<hc;copy++) sum += pr[copy]*x[(size_t)copy*D+col];
+        y[col]=sum;
+    }
+}
+
 /* Hyperconnection post on resident device data. Each output element is owned
  * by one thread and sums source streams in the same order as coli_hc_post(). */
 __global__ static void pipe_hc_post_kernel(float *out,const float *branch,
@@ -3035,6 +3132,27 @@ extern "C" float *coli_cuda_pipe_scratch(int device,int slot,size_t bytes){
     if(slot<0||slot>=27||!select_ctx(ctx)) return NULL;
     if(!reserve(&ctx->pipe_buf[slot],&ctx->pipe_cap[slot],bytes)) return NULL;
     return ctx->pipe_buf[slot];
+}
+extern "C" int coli_cuda_pipe_hc_pre(int device,float *out_dev,float *post_dev,float *comb_dev,
+        const float *input_dev,const float *fn_dev,const float *scale_dev,const float *base_dev,
+        int S,int hc,int D,int iterations,float norm_eps,float hc_eps){
+    if(fault_injected()) return 0;
+    DeviceContext *ctx=find_ctx(device);
+    if(!out_dev||!post_dev||!comb_dev||!input_dev||!fn_dev||!scale_dev||!base_dev||
+       S<1||hc<1||hc>8||D<1||iterations<1||norm_eps<0.f||hc_eps<0.f||!select_ctx(ctx))
+        return 0;
+    const int mix_count=(2+hc)*hc;
+    float *inv=coli_cuda_pipe_scratch(device,5,(size_t)S*sizeof(float));
+    float *mixes=coli_cuda_pipe_scratch(device,6,(size_t)S*mix_count*sizeof(float));
+    float *pre=coli_cuda_pipe_scratch(device,7,(size_t)S*hc*sizeof(float));
+    if(!inv||!mixes||!pre) return 0;
+    pipe_hc_inv_rms_kernel<<<S,1>>>(inv,input_dev,S,hc,D,norm_eps);
+    pipe_hc_mix_kernel<<<dim3((unsigned)mix_count,(unsigned)S),1>>>(
+        mixes,input_dev,fn_dev,inv,S,hc,D);
+    pipe_hc_sinkhorn_kernel<<<S,1>>>(pre,post_dev,comb_dev,mixes,scale_dev,base_dev,
+                                     S,hc,iterations,hc_eps);
+    pipe_hc_collapse_kernel<<<S,256>>>(out_dev,input_dev,pre,S,hc,D);
+    return cuda_ok(cudaGetLastError(),"pipe hyperconnection pre");
 }
 extern "C" void *coli_cuda_pipe_alloc(int device,size_t bytes){
     DeviceContext *ctx=find_ctx(device); if(!select_ctx(ctx)) return NULL;

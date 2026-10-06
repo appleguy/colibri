@@ -25,6 +25,75 @@ static int close_enough(const float *got, const float *want, int n) {
     return 1;
 }
 
+static float hc_ref_sigmoid(float x){
+    if(x>=0.f){ float d=::expf(-x); return 1.f/(1.f+d); }
+    float g=::expf(x); return g/(1.f+g);
+}
+static int hc_ref_pre(float *out,float *post,float *comb,const float *input,
+                      const float *fn,const float scale[3],const float *base,
+                      int hc,int D,int iterations,float norm_eps,float hc_eps){
+    if(hc<1||hc>8||D<1||iterations<1) return -1;
+    const int flat=hc*D,mix_count=(2+hc)*hc;
+    float mixes[80],pre[8],sums[8];
+    float ms=0.f;
+    for(int i=0;i<flat;i++) ms += input[i]*input[i];
+    float inv=1.f/::sqrtf(ms/flat+norm_eps);
+    for(int row=0;row<mix_count;row++){
+        float sum=0.f;
+        for(int col=0;col<flat;col++) sum += fn[(size_t)row*flat+col]*input[col];
+        mixes[row]=sum*inv;
+    }
+    for(int i=0;i<hc;i++){
+        pre[i]=hc_ref_sigmoid(mixes[i]*scale[0]+base[i])+hc_eps;
+        post[i]=2.f*hc_ref_sigmoid(mixes[hc+i]*scale[1]+base[hc+i]);
+    }
+    const int mo=2*hc;
+    for(int row=0;row<hc;row++){
+        float maximum=-INFINITY;
+        for(int col=0;col<hc;col++){
+            int idx=mo+row*hc+col;
+            float v=mixes[idx]*scale[2]+base[idx];
+            comb[row*hc+col]=v;
+            if(v>maximum) maximum=v;
+        }
+        float sum=0.f;
+        for(int col=0;col<hc;col++){
+            float v=::expf(comb[row*hc+col]-maximum);
+            comb[row*hc+col]=v; sum+=v;
+        }
+        for(int col=0;col<hc;col++) comb[row*hc+col]=comb[row*hc+col]/sum+hc_eps;
+    }
+    for(int col=0;col<hc;col++){
+        float sum=0.f;
+        for(int row=0;row<hc;row++) sum+=comb[row*hc+col];
+        sums[col]=sum;
+    }
+    for(int row=0;row<hc;row++)
+        for(int col=0;col<hc;col++) comb[row*hc+col]/=sums[col]+hc_eps;
+    for(int it=1;it<iterations;it++){
+        for(int row=0;row<hc;row++){
+            float sum=0.f;
+            for(int col=0;col<hc;col++) sum+=comb[row*hc+col];
+            sums[row]=sum;
+        }
+        for(int row=0;row<hc;row++)
+            for(int col=0;col<hc;col++) comb[row*hc+col]/=sums[row]+hc_eps;
+        for(int col=0;col<hc;col++){
+            float sum=0.f;
+            for(int row=0;row<hc;row++) sum+=comb[row*hc+col];
+            sums[col]=sum;
+        }
+        for(int row=0;row<hc;row++)
+            for(int col=0;col<hc;col++) comb[row*hc+col]/=sums[col]+hc_eps;
+    }
+    for(int col=0;col<D;col++){
+        float sum=0.f;
+        for(int copy=0;copy<hc;copy++) sum+=pre[copy]*input[(size_t)copy*D+col];
+        out[col]=sum;
+    }
+    return 0;
+}
+
 static int relative_rms(const float *got,const float *want,int n,float limit){
     double err=0,ref=0; for(int i=0;i<n;i++){double d=got[i]-want[i];err+=d*d;ref+=(double)want[i]*want[i];}
     float r=(float)std::sqrt(err/(ref+1e-20));
@@ -540,8 +609,50 @@ int main(int argc, char **argv) {
     coli_cuda_tensor_free(opt);
     coli_cuda_tensor_free(avt);
 
-    /* Device-resident mHC post: preserve the CPU source-stream summation order
-     * for each destination/column and add the branch through post[]. */
+    /* Device-resident mHC pre: preserve the CPU reduction/Sinkhorn ordering
+     * while parallelizing independent tokens, mix rows and output columns. */
+    {
+        constexpr int HS=2,HC=3,HD=5,HM=(2+HC)*HC;
+        float input[HS*HC*HD],fn[HM*HC*HD],scale[3]={.7f,1.1f,.9f},base[HM];
+        for(int i=0;i<HS*HC*HD;i++) input[i]=std::sin((i+1)*.13f);
+        for(int i=0;i<HM*HC*HD;i++) fn[i]=std::cos((i+3)*.017f)*.2f;
+        for(int i=0;i<HM;i++) base[i]=std::sin((i+5)*.11f)*.1f;
+        float oref[HS*HD],pref[HS*HC],cref[HS*HC*HC];
+        for(int t=0;t<HS;t++){
+            if(hc_ref_pre(oref+t*HD,pref+t*HC,cref+t*HC*HC,
+                           input+t*HC*HD,fn,scale,base,HC,HD,4,1e-6f,1e-6f)){
+                std::fprintf(stderr,"CPU hyperconnection pre reference failed\n");
+                return 1;
+            }
+        }
+        float ogot[HS*HD],pgot[HS*HC],cgot[HS*HC*HC];
+        float *id=(float*)coli_cuda_pipe_alloc(d0,sizeof(input));
+        float *fd=(float*)coli_cuda_pipe_alloc(d0,sizeof(fn));
+        float *sd=(float*)coli_cuda_pipe_alloc(d0,sizeof(scale));
+        float *bad=(float*)coli_cuda_pipe_alloc(d0,sizeof(base));
+        float *od=(float*)coli_cuda_pipe_alloc(d0,sizeof(ogot));
+        float *pd=(float*)coli_cuda_pipe_alloc(d0,sizeof(pgot));
+        float *cd=(float*)coli_cuda_pipe_alloc(d0,sizeof(cgot));
+        if(!id||!fd||!sd||!bad||!od||!pd||!cd||
+           !coli_cuda_pipe_upload(d0,id,input,sizeof(input))||
+           !coli_cuda_pipe_upload(d0,fd,fn,sizeof(fn))||
+           !coli_cuda_pipe_upload(d0,sd,scale,sizeof(scale))||
+           !coli_cuda_pipe_upload(d0,bad,base,sizeof(base))||
+           !coli_cuda_pipe_hc_pre(d0,od,pd,cd,id,fd,sd,bad,HS,HC,HD,4,1e-6f,1e-6f)||
+           !coli_cuda_pipe_download(d0,od,ogot,sizeof(ogot))||
+           !coli_cuda_pipe_download(d0,pd,pgot,sizeof(pgot))||
+           !coli_cuda_pipe_download(d0,cd,cgot,sizeof(cgot))||
+           !close_enough(ogot,oref,HS*HD)||
+           !close_enough(pgot,pref,HS*HC)||
+           !close_enough(cgot,cref,HS*HC*HC)){
+            std::fprintf(stderr,"CUDA hyperconnection pre mismatch\n");
+            return 1;
+        }
+        coli_cuda_pipe_free(d0,cd); coli_cuda_pipe_free(d0,pd); coli_cuda_pipe_free(d0,od);
+        coli_cuda_pipe_free(d0,bad); coli_cuda_pipe_free(d0,sd);
+        coli_cuda_pipe_free(d0,fd); coli_cuda_pipe_free(d0,id);
+    }
+
     {
         constexpr int HC=3, HD=5;
         float residual[HC*HD]={

@@ -918,7 +918,7 @@ class LoaderStubFixtureTest(unittest.TestCase):
             cls.fixture = None
 
     def test_abi_is_derived_from_the_loader_source(self):
-        """55 mandatory + 9 optional, parsed from backend_loader.c.
+        """56 mandatory + 9 optional, parsed from backend_loader.c.
 
         The counts are a deliberate tripwire: adding a RESOLVE to the loader
         widens the ABI every Windows DLL must satisfy, and that should be a
@@ -928,9 +928,9 @@ class LoaderStubFixtureTest(unittest.TestCase):
         just a different integer.
         """
         f = self.fixture
-        self.assertEqual(len(f.mandatory), 55)
+        self.assertEqual(len(f.mandatory), 56)
         self.assertEqual(len(f.optional), 9)   # +expert_mxfp4: optional Kimi SiTU pipeline
-        self.assertEqual(len(f.exports), 64)
+        self.assertEqual(len(f.exports), 65)
         self.assertEqual(len(f.exports), len(f.mandatory) + len(f.optional))
         self.assertIn("coli_cuda_init", f.mandatory)
         self.assertIn("coli_cuda_e8_set_grid", f.optional)
@@ -938,10 +938,11 @@ class LoaderStubFixtureTest(unittest.TestCase):
         # attention_project_ragged: paged ragged KV runtime (#795).
         self.assertIn("coli_cuda_attention_project_ragged", f.mandatory)
         # GLM-5.3 CUDA-resident/sparse-attention ABI moved the tripwire from 47 to 54;
-        # pipe_hc_post is the first mHC-resident-pipeline addition after that.
+        # pipe_hc_post and pipe_hc_pre extend that into the mHC-resident pipeline.
         self.assertIn("coli_cuda_attention_absorbed_sparse_batch", f.mandatory)
         self.assertIn("coli_cuda_attention_absorbed_sparse_project_batch", f.mandatory)
         self.assertIn("coli_cuda_attention_absorbed_sparse_project_batch_dev_out", f.mandatory)
+        self.assertIn("coli_cuda_pipe_hc_pre", f.mandatory)
         self.assertIn("coli_cuda_pipe_hc_post", f.mandatory)
         self.assertIn("coli_cuda_expert_group_clamped", f.mandatory)
         self.assertIn("coli_cuda_expert_group_clamped_resident", f.mandatory)
