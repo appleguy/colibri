@@ -786,6 +786,20 @@ static int cuda_router_mode(void) {
 #endif
 }
 
+static int cuda_chain_mode(void) {
+#ifdef COLI_CUDA
+    static int mode = -1;
+    if (mode < 0) {
+        const char *s = getenv("COLI_CUDA_GLM53_CHAIN");
+        mode = s && *s ? atoi(s) : 0;
+        if (mode < 0 || mode > 2) mode = 0;
+    }
+    return mode;
+#else
+    return 0;
+#endif
+}
+
 static void profile_vram_sample(GModel *m) {
 #ifdef COLI_CUDA
     static int enabled = -1;
@@ -1247,8 +1261,8 @@ static void kda_layer(const Cfg *c, const GLayer *l, const float *x, int tokens,
 }
 
 /* ---------- MLA + indexer con k-pool ---------- */
-static void mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
-                      float *out, GLayerState *st, int base) {
+static int mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
+                     float *out, float *out_dev, GLayerState *st, int base) {
     const Cfg *c = &m->c;
     const int H = c->n_heads, QK = c->qk_nope, V = c->v_head;
     const int IH = c->index_nh, ID = c->index_hd;
@@ -1316,9 +1330,30 @@ static void mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
     float *context = NULL, *pooled = NULL, *score = NULL;
     const float scale = 1.0f / sqrtf((float)QK);
 #ifdef COLI_CUDA
-    int cuda_attn_mode = getenv("COLI_CUDA_GLM53_ATTN") ? atoi(getenv("COLI_CUDA_GLM53_ATTN")) : 0;
+    const int chain_mode = out_dev ? cuda_chain_mode() : 0;
+    int cuda_attn_mode = chain_mode ? 0 :
+        (getenv("COLI_CUDA_GLM53_ATTN") ? atoi(getenv("COLI_CUDA_GLM53_ATTN")) : 0);
     float *cuda_context = NULL;
     int cuda_attn_ok = 0;
+    int cuda_chain_ok = 0;
+    if (chain_mode && width <= 4096) {
+        GLayer *mutable_l = (GLayer *)l;
+        g_cuda_attn_attempts++;
+        const double cuda_attn_t0 = omp_get_wtime();
+        if (cuda_mat_ensure(&mutable_l->kvb_v) && cuda_mat_ensure(&mutable_l->o))
+            cuda_chain_ok = coli_cuda_attention_absorbed_sparse_project_batch_dev_out(
+                (ColiCudaTensor *)mutable_l->kvb_v.cuda,
+                (ColiCudaTensor *)mutable_l->o.cuda, out_dev, absorbed,
+                latent, selected, tokens, H, V, L, seen, width, scale);
+        g_cuda_attn_seconds += omp_get_wtime() - cuda_attn_t0;
+        if (cuda_chain_ok) g_cuda_attn_success++;
+        else g_cuda_attn_fallback++;
+        if (chain_mode == 1 && cuda_chain_ok) {
+            free(selected); free(valid); free(head_w); free(iq);
+            free(absorbed); free(queries); free(qa);
+            return 1;
+        }
+    }
     if (cuda_attn_mode && width <= 4096) {
         GLayer *mutable_l = (GLayer *)l;
         g_cuda_attn_attempts++;
@@ -1344,7 +1379,7 @@ static void mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
             free(score); free(pooled); free(context);
             free(selected); free(valid); free(head_w); free(iq);
             free(absorbed); free(queries); free(qa);
-            return;
+            return 0;
         }
     }
 #endif
@@ -1414,6 +1449,11 @@ static void mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
 
     free(context); free(selected); free(valid); free(head_w);
     free(iq); free(absorbed); free(queries); free(qa);
+#ifdef COLI_CUDA
+    return cuda_chain_ok;
+#else
+    return 0;
+#endif
 }
 
 /* ---------- FFN: denso oppure MoE ---------- */
@@ -3296,7 +3336,16 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
     float *branch = malloc((size_t)n * D * sizeof(float));
     float *post = malloc((size_t)n * H * sizeof(float));
     float *comb = malloc((size_t)n * H * H * sizeof(float));
-    if (!collapsed || !normed || !branch || !post || !comb) {
+#ifdef COLI_CUDA
+    const int chain_mode = cuda_chain_mode();
+    float *chain_verify = chain_mode == 2
+        ? malloc((size_t)n * H * D * sizeof(float)) : NULL;
+#else
+    const int chain_mode = 0;
+    float *chain_verify = NULL;
+#endif
+    if (!collapsed || !normed || !branch || !post || !comb ||
+        (chain_mode == 2 && !chain_verify)) {
         fprintf(stderr, "OOM allocating forward-pass temporaries\n"); exit(1);
     }
 
@@ -3313,15 +3362,52 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
             for (int t = 0; t < n; t++)
                 rms(normed + (size_t)t * D, collapsed + (size_t)t * D,
                     site ? l->post_ln : l->in_ln, D, c->eps);
+#ifdef COLI_CUDA
+            float *chain_branch_dev = NULL, *chain_residual_dev = NULL;
+            float *chain_post_dev = NULL, *chain_comb_dev = NULL, *chain_next_dev = NULL;
+            int chain_ready = 0;
+            if (!site && c->is_full[i] && chain_mode == 2 && g_cuda_ready) {
+                const size_t branch_b = (size_t)n * D * sizeof(float);
+                const size_t residual_b = (size_t)n * H * D * sizeof(float);
+                const size_t post_b = (size_t)n * H * sizeof(float);
+                const size_t comb_b = (size_t)n * H * H * sizeof(float);
+                chain_branch_dev = coli_cuda_pipe_scratch(g_cuda_device, 0, branch_b);
+                chain_residual_dev = coli_cuda_pipe_scratch(g_cuda_device, 1, residual_b);
+                chain_post_dev = coli_cuda_pipe_scratch(g_cuda_device, 2, post_b);
+                chain_comb_dev = coli_cuda_pipe_scratch(g_cuda_device, 3, comb_b);
+                chain_next_dev = coli_cuda_pipe_scratch(g_cuda_device, 4, residual_b);
+                chain_ready = chain_branch_dev && chain_residual_dev && chain_post_dev &&
+                              chain_comb_dev && chain_next_dev &&
+                              coli_cuda_pipe_upload(g_cuda_device, chain_residual_dev,
+                                                    streams, residual_b) &&
+                              coli_cuda_pipe_upload(g_cuda_device, chain_post_dev,
+                                                    post, post_b) &&
+                              coli_cuda_pipe_upload(g_cuda_device, chain_comb_dev,
+                                                    comb, comb_b);
+            }
+#endif
             const double t_phase = now_s();
+#ifdef COLI_CUDA
+            int chain_branch_ok = 0;
+#endif
             if (!site) {
                 GLayerState *st = &s->layer[i];
                 /* Lo stato non si azzera a ogni chiamata: e' della
                  * conversazione, e azzerarlo qui vorrebbe dire ricominciare
                  * la ricorrenza a ogni token generato. */
-                if (c->is_full[i]) mla_layer(m, l, normed, n, branch, st, start);
-                else kda_layer(c, l, normed, n, branch, st->kda_state, st->kda_window,
-                               s->kda_scratch);
+                if (c->is_full[i]) {
+#ifdef COLI_CUDA
+                    chain_branch_ok = chain_ready &&
+                        mla_layer(m, l, normed, n, branch, chain_branch_dev, st, start);
+                    if (!chain_ready)
+                        (void)mla_layer(m, l, normed, n, branch, NULL, st, start);
+#else
+                    (void)mla_layer(m, l, normed, n, branch, NULL, st, start);
+#endif
+                } else {
+                    kda_layer(c, l, normed, n, branch, st->kda_state, st->kda_window,
+                              s->kda_scratch);
+                }
             } else {
                 ffn_layer(m, l, i, normed, n, branch);
             }
@@ -3331,13 +3417,57 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
             /* Optional cudaMemGetInfo sampling lives outside the phase timer so
              * measurement overhead never inflates attention_s/ffn_s. */
             profile_vram_sample(m);
-            for (int t = 0; t < n; t++)
-                coli_hc_post(next + (size_t)t * H * D, branch + (size_t)t * D,
-                             streams + (size_t)t * H * D, post + (size_t)t * H,
-                             comb + (size_t)t * H * H, H, D);
+            int post_done = 0;
+#ifdef COLI_CUDA
+            if (chain_branch_ok) {
+                int gpu_post_ok = 1;
+                for (int t = 0; t < n; t++) {
+                    gpu_post_ok = gpu_post_ok && coli_cuda_pipe_hc_post(
+                        g_cuda_device,
+                        chain_next_dev + (size_t)t * H * D,
+                        chain_branch_dev + (size_t)t * D,
+                        chain_residual_dev + (size_t)t * H * D,
+                        chain_post_dev + (size_t)t * H,
+                        chain_comb_dev + (size_t)t * H * H,
+                        H, D);
+                }
+                /* Verification mode keeps the CPU post authoritative, then
+                 * compares the whole residual bank after one D2H. */
+                for (int t = 0; t < n; t++)
+                    coli_hc_post(next + (size_t)t * H * D, branch + (size_t)t * D,
+                                 streams + (size_t)t * H * D, post + (size_t)t * H,
+                                 comb + (size_t)t * H * H, H, D);
+                post_done = 1;
+                if (gpu_post_ok && coli_cuda_pipe_download(
+                        g_cuda_device, chain_next_dev, chain_verify,
+                        (size_t)n * H * D * sizeof(float))) {
+                    float max_abs = 0.0f, max_rel = 0.0f;
+                    for (size_t q = 0; q < (size_t)n * H * D; q++) {
+                        float da = fabsf(chain_verify[q] - next[q]);
+                        float dr = da / (fabsf(next[q]) + 1e-6f);
+                        if (da > max_abs) max_abs = da;
+                        if (dr > max_rel) max_rel = dr;
+                    }
+                    static int chain_reports = 0;
+                    if (chain_reports < 16) {
+                        fprintf(stderr,
+                                "[CUDA] GLM53 chain verify layer=%d start=%d n=%d "
+                                "max_abs=%.6g max_rel=%.6g\n",
+                                i, start, n, max_abs, max_rel);
+                        chain_reports++;
+                    }
+                }
+            }
+#endif
+            if (!post_done)
+                for (int t = 0; t < n; t++)
+                    coli_hc_post(next + (size_t)t * H * D, branch + (size_t)t * D,
+                                 streams + (size_t)t * H * D, post + (size_t)t * H,
+                                 comb + (size_t)t * H * H, H, D);
             float *swap = streams; streams = next; next = swap;
         }
     }
+    free(chain_verify);
     free(comb); free(post); free(branch); free(normed); free(collapsed);
     return streams;
 }
