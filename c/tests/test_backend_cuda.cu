@@ -1,4 +1,5 @@
 #include "../backend_cuda.h"
+#include "../sparse_index.h"
 
 #include <cmath>
 #include <cstdio>
@@ -853,6 +854,37 @@ int main(int argc, char **argv) {
         coli_cuda_pipe_free(d0,bd);
         coli_cuda_pipe_free(d0,wd);
         coli_cuda_pipe_free(d0,xd);
+    }
+
+    /* GLM-5.3 decode sparse-index contract: compare against the exact CPU
+     * reference with leading padding, complete pools and an incomplete tail. */
+    {
+        constexpr int SQ=10,SH=2,SD=4,SP=2,ST=4,SW=ST+SP-1,Q=8;
+        float query[SH*SD]={1.f,.25f,-.5f,.75f, -.25f,1.f,.5f,.1f};
+        float keys[SQ*SD],gates[SQ*SD],ape[SP*SD]={
+            .05f,-.10f,.15f,.02f, -.03f,.08f,-.04f,.12f
+        };
+        float hw[SH]={.8f,.35f};
+        unsigned char valid[SQ]={0,0,1,1,1,1,1,1,1,0};
+        for(int t=0;t<SQ;t++)for(int j=0;j<SD;j++){
+            keys[t*SD+j]=(float)((t+1)*(j+2))*.03125f +
+                         ((t+j)&1 ? .07f : -.02f);
+            gates[t*SD+j]=(float)((t*3+j*5)%11)*.07f-.25f;
+        }
+        int cpu[SW],gpu[SW];
+        if(coli_sparse_index_select_range(cpu,query,keys,gates,hw,ape,valid,
+                                          SQ,SH,SD,SP,ST,1,Q,Q+1) ||
+           !coli_cuda_sparse_index_select_decode(d0,gpu,query,keys,gates,hw,ape,
+                                                 valid,SQ,SH,SD,SP,ST,1,Q)){
+            std::fprintf(stderr,"GLM sparse index execution failed\n");
+            return 1;
+        }
+        for(int i=0;i<SW;i++) if(cpu[i]!=gpu[i]){
+            std::fprintf(stderr,
+                "GLM sparse index mismatch at %d: gpu=%d cpu=%d\n",
+                i,gpu[i],cpu[i]);
+            return 1;
+        }
     }
 
     uint64_t group_calls=0,group_experts=0,group_total_rows=0;

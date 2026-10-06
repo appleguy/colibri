@@ -22,6 +22,7 @@ static_assert(FP8_BLOCK == 128, "fmt=8 on-disk containers carry ceil(dim/128)-ed
 #include <cstring>
 #include <cerrno>
 #include <chrono>
+#include <cfloat>
 #include <mutex>
 #include <vector>
 
@@ -3216,6 +3217,128 @@ extern "C" int coli_cuda_pipe_rope_base(int device,float *v_dev,int pos_base,int
     pipe_rope_rows<<<rows,128>>>(v_dev,NULL,pos_base,stride,offset,R,heads,theta);
     return cuda_ok(cudaGetLastError(),"pipe rope base");
 }
+/* ---- GLM pooled sparse indexer: decode-first fidelity path -------------- */
+__global__ static void glm_sparse_pool_kernel(float *pooled,unsigned char *complete,
+        const float *keys,const float *gates,const float *ape,const unsigned char *valid,
+        int sequence,int dim,int pool,int first,int pools){
+    int p=blockIdx.x;
+    if(p>=pools)return;
+    __shared__ int okp;
+    int start=first+p*pool;
+    if(threadIdx.x==0){
+        int ok=(start+pool<=sequence);
+        for(int j=0;ok&&j<pool;j++) if(!valid[start+j]) ok=0;
+        okp=ok; complete[p]=(unsigned char)ok;
+    }
+    __syncthreads();
+    if(!okp)return;
+    for(int dd=threadIdx.x;dd<dim;dd+=blockDim.x){
+        float maximum=-FLT_MAX;
+        for(int j=0;j<pool;j++){
+            float z=gates[(size_t)(start+j)*dim+dd]+ape[(size_t)j*dim+dd];
+            if(z>maximum) maximum=z;
+        }
+        float total=0.f;
+        for(int j=0;j<pool;j++)
+            total += expf(gates[(size_t)(start+j)*dim+dd]+ape[(size_t)j*dim+dd]-maximum);
+        float mixed=0.f;
+        for(int j=0;j<pool;j++){
+            float w=expf(gates[(size_t)(start+j)*dim+dd]+ape[(size_t)j*dim+dd]-maximum)/total;
+            mixed += w*keys[(size_t)(start+j)*dim+dd];
+        }
+        pooled[(size_t)p*dim+dd]=mixed;
+    }
+}
+__global__ static void glm_sparse_score_kernel(float *scores,const float *query,
+        const float *pooled,const float *head_w,const unsigned char *complete,
+        int q,int first,int pools,int pool,int heads,int dim){
+    int p=blockIdx.x*blockDim.x+threadIdx.x;
+    if(p>=pools)return;
+    int last=first+(p+1)*pool-1;
+    if(!complete[p]||last>q){scores[p]=-FLT_MAX;return;}
+    float score=0.f,scale=1.f/sqrtf((float)dim);
+    const float *pk=pooled+(size_t)p*dim;
+    for(int h=0;h<heads;h++){
+        const float *qh=query+(size_t)h*dim;
+        float dot=0.f;
+        for(int dd=0;dd<dim;dd++) dot += qh[dd]*pk[dd];
+        if(dot>0.f) score += head_w[h]*dot*scale;
+    }
+    scores[p]=score;
+}
+__global__ static void glm_sparse_select_kernel(int *out,const float *scores,
+        const unsigned char *valid,int sequence,int q,int first,int pools,
+        int pool,int topk,int with_tail){
+    if(blockIdx.x||threadIdx.x)return;
+    int width=topk+(with_tail?pool-1:0),wanted=topk/pool;
+    for(int i=0;i<width;i++)out[i]=-1;
+    if(q<0||q>=sequence||!valid[q])return;
+    for(int rank=0;rank<wanted;rank++){
+        int best=-1; float bv=-FLT_MAX;
+        for(int p=0;p<pools;p++){
+            float v=scores[p];
+            if(v<=-FLT_MAX)continue;
+            int used=0;
+            for(int r=0;r<rank;r++) if(out[r*pool]==first+p*pool){used=1;break;}
+            if(!used&&(best<0||v>bv)){best=p;bv=v;}
+        }
+        if(best<0)break;
+        for(int j=0;j<pool;j++)out[rank*pool+j]=first+best*pool+j;
+    }
+    if(with_tail){
+        int visible=0;
+        for(int i=first;i<=q;i++)if(valid[i])visible++;
+        int tail=visible%pool,tail_start=first+visible-tail;
+        for(int j=0;j<tail&&j<pool-1;j++)
+            if(tail_start+j<=q&&valid[tail_start+j])out[topk+j]=tail_start+j;
+    }
+}
+extern "C" int coli_cuda_sparse_index_select_decode(int device,int *out_host,
+        const float *query,const float *keys,const float *gates,const float *head_w,
+        const float *ape,const unsigned char *valid,int sequence,int heads,int dim,
+        int pool,int topk,int with_tail,int q){
+    if(fault_injected())return 0;
+    DeviceContext *dc=find_ctx(device);
+    if(!out_host||!query||!keys||!gates||!head_w||!ape||!valid||
+       sequence<1||heads<1||dim<1||pool<1||topk<pool||topk%pool||
+       q<0||q>=sequence||!select_ctx(dc))return 0;
+    int first=0;while(first<sequence&&!valid[first])first++;
+    int pools=(sequence+pool-1)/pool,width=topk+(with_tail?pool-1:0);
+    size_t qb=(size_t)heads*dim*sizeof(float),kb=(size_t)sequence*dim*sizeof(float),
+           hb=(size_t)heads*sizeof(float),ab=(size_t)pool*dim*sizeof(float),
+           vb=(size_t)sequence*sizeof(unsigned char),pb=(size_t)pools*dim*sizeof(float),
+           sb=(size_t)pools*sizeof(float),cb=(size_t)pools*sizeof(unsigned char),
+           ob=(size_t)width*sizeof(int);
+    float *dq=coli_cuda_pipe_scratch(device,22,qb);
+    float *dk=coli_cuda_pipe_scratch(device,23,kb);
+    float *dg=coli_cuda_pipe_scratch(device,24,kb);
+    float *dh=coli_cuda_pipe_scratch(device,25,hb);
+    float *da=coli_cuda_pipe_scratch(device,26,ab);
+    if(!dq||!dk||!dg||!dh||!da||
+       !reserve(&dc->aq,&dc->aq_cap,pb)||!reserve(&dc->al,&dc->al_cap,sb)||
+       !reserve_bytes((void**)&dc->ar,&dc->ar_cap,cb)||
+       !reserve_bytes((void**)&dc->asel,&dc->asel_cap,ob+vb))return 0;
+    unsigned char *dv=(unsigned char*)dc->asel+ob;
+    if(!cuda_ok(cudaMemcpyAsync(dq,query,qb,cudaMemcpyHostToDevice,dc->stream),"sparse index query upload")||
+       !cuda_ok(cudaMemcpyAsync(dk,keys,kb,cudaMemcpyHostToDevice,dc->stream),"sparse index key upload")||
+       !cuda_ok(cudaMemcpyAsync(dg,gates,kb,cudaMemcpyHostToDevice,dc->stream),"sparse index gate upload")||
+       !cuda_ok(cudaMemcpyAsync(dh,head_w,hb,cudaMemcpyHostToDevice,dc->stream),"sparse index head weight upload")||
+       !cuda_ok(cudaMemcpyAsync(da,ape,ab,cudaMemcpyHostToDevice,dc->stream),"sparse index ape upload")||
+       !cuda_ok(cudaMemcpyAsync(dv,valid,vb,cudaMemcpyHostToDevice,dc->stream),"sparse index valid upload"))
+        return 0;
+    glm_sparse_pool_kernel<<<pools,128,0,dc->stream>>>(dc->aq,(unsigned char*)dc->ar,
+        dk,dg,da,dv,sequence,dim,pool,first,pools);
+    glm_sparse_score_kernel<<<(pools+127)/128,128,0,dc->stream>>>(dc->al,dq,dc->aq,dh,
+        (unsigned char*)dc->ar,q,first,pools,pool,heads,dim);
+    glm_sparse_select_kernel<<<1,1,0,dc->stream>>>(dc->asel,dc->al,dv,sequence,q,first,pools,
+        pool,topk,with_tail);
+    if(!cuda_ok(cudaGetLastError(),"GLM sparse index launch")||
+       !cuda_ok(cudaMemcpyAsync(out_host,dc->asel,ob,cudaMemcpyDeviceToHost,dc->stream),
+                "GLM sparse index download")||
+       !cuda_ok(cudaStreamSynchronize(dc->stream),"GLM sparse index synchronize"))return 0;
+    return 1;
+}
+
 /* ---- device router (#431 PR-A) -------------------------------------------
  * Router for one decode row, entirely on the layer's home device: logits GEMV
  * (E x D, tiny) + sigmoid, bias-augmented top-K selection, route-level TOPP

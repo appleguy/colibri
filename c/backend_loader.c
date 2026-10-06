@@ -147,6 +147,7 @@ typedef int (*fn_pipe_rmsnorm)(int device,float *y_dev,const float *x_dev, const
 typedef int (*fn_pipe_rmsnorm_s)(int device,float *y_dev,const float *x_dev, const float *w_dev,int S,int D,float eps, int xstride,int ystride);
 typedef int (*fn_group_resident_issue)(ColiCudaTensor *const *gates,ColiCudaTensor *const *ups,ColiCudaTensor *const *downs,const float *weights,int count,int home_device,const float *x_src_dev,float *partial_slot_dev);
 typedef int (*fn_group_resident_take)(int home_device,const int *devices,int n_issued,float *slots_dev,float *acc_dev,int D);
+typedef int (*fn_sparse_index_select_decode)(int device,int *out_host,const float *query,const float *keys,const float *gates,const float *head_w,const float *ape,const unsigned char *valid,int sequence,int heads,int dim,int pool,int topk,int with_tail,int q);
 typedef int (*fn_pipe_router)(int device,const float *x_dev,const void *rw_dev,const void *rb_dev,int D,int E,int Ksel,float topp,int norm_topk,float routed_scale,int *idx_host,float *w_host,int *keff_host);
 typedef int (*fn_pipe_rope)(int device,float *v_dev,const int *pos_dev,int rows, int stride,int offset,int R,int heads,float theta);
 typedef int (*fn_pipe_rope_base)(int device,float *v_dev,int pos_base,int rows, int stride,int offset,int R,int heads,float theta);
@@ -228,6 +229,7 @@ static struct {
     fn_group_resident_issue expert_group_resident_issue;
     fn_group_resident_issue_clamped expert_group_resident_issue_clamped;
     fn_group_resident_take expert_group_resident_take;
+    fn_sparse_index_select_decode sparse_index_select_decode;
     fn_pipe_router pipe_router;
     fn_pipe_rope pipe_rope;
     fn_pipe_rope_base pipe_rope_base;
@@ -1499,6 +1501,7 @@ static int coli_cuda_load(void){
     RESOLVE(expert_group_resident_issue, fn_group_resident_issue)
     RESOLVE(expert_group_resident_issue_clamped, fn_group_resident_issue_clamped)
     RESOLVE(expert_group_resident_take, fn_group_resident_take)
+    RESOLVE(sparse_index_select_decode, fn_sparse_index_select_decode)
     RESOLVE(pipe_router, fn_pipe_router)
     RESOLVE(pipe_rope, fn_pipe_rope)
     RESOLVE(pipe_rope_base, fn_pipe_rope_base)
@@ -1892,6 +1895,11 @@ int coli_cuda_expert_group_resident_issue_clamped(ColiCudaTensor *const *gates,C
 int coli_cuda_expert_group_resident_take(int home_device,const int *devices,int n_issued,float *slots_dev,float *acc_dev,int D){
     if(!g_cuda.available || !g_cuda.expert_group_resident_take){ return 0; }
     return g_cuda.expert_group_resident_take(home_device, devices, n_issued, slots_dev, acc_dev, D);
+}
+
+int coli_cuda_sparse_index_select_decode(int device,int *out_host,const float *query,const float *keys,const float *gates,const float *head_w,const float *ape,const unsigned char *valid,int sequence,int heads,int dim,int pool,int topk,int with_tail,int q){
+    if(!g_cuda.available || !g_cuda.sparse_index_select_decode){ return 0; }
+    return g_cuda.sparse_index_select_decode(device,out_host,query,keys,gates,head_w,ape,valid,sequence,heads,dim,pool,topk,with_tail,q);
 }
 
 int coli_cuda_pipe_router(int device,const float *x_dev,const void *rw_dev,const void *rb_dev,int D,int E,int Ksel,float topp,int norm_topk,float routed_scale,int *idx_host,float *w_host,int *keff_host){

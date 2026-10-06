@@ -341,6 +341,10 @@ COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_resident_issue_clamped(
         float swiglu_limit);
 COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_resident_take(int home_device,const int *devices,
         int n_issued,float *slots_dev,float *acc_dev,int D);
+COLI_CUDA_DLLEXPORT int coli_cuda_sparse_index_select_decode(int device,int *out_host,
+        const float *query,const float *keys,const float *gates,const float *head_w,
+        const float *ape,const unsigned char *valid,int sequence,int heads,int dim,
+        int pool,int topk,int with_tail,int q);
 COLI_CUDA_DLLEXPORT int coli_cuda_pipe_router(int device,const float *x_dev,
         const void *rw_dev,const void *rb_dev,int D,int E,int Ksel,
         float topp,int norm_topk,float routed_scale,
