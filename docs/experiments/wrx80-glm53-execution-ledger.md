@@ -516,3 +516,19 @@ At the current 1,142-expert resident budget across 42 routed layers:
 So a fair per-layer allocation sacrifices only ~0.37 percentage points of aggregate historical hit mass while improving the weakest layer by ~6.6x. This is a strong candidate for increasing complete expert-set residency, which the current global policy has measured at 0% in short decode runs.
 
 Next N40 runtime step should be opt-in first: implement a fair/interleaved admission mode, preserve the global policy as baseline, and A/B complete-set coverage + wall time before changing defaults.
+
+
+### Experimental-matrix correction — native Windows attention path
+
+Review of `mla_layer()` found that B1/B2/B3 used `CHAIN=0` without setting `COLI_CUDA_GLM53_ATTN=1`. Therefore those runs correctly qualify and measure the GPU router, GPU sparse indexer, resident expert tier, and other enabled CUDA expert work, but their sparse MLA attention remained on the CPU path. They must not be treated as the all-GPU-attention benchmark.
+
+This does not invalidate the N20 result: router/indexer promotion from B1 -> B2 -> B3 was isolated as intended, and B3 still established 8/8 authoritative GPU indexer successes with zero fallback. It does change the next performance gate.
+
+Current source also shows `CHAIN=1` is not yet production-effective: `run_layers()` only builds the device mHC pre/RMSNorm site-entry buffers when `chain_mode == 2`, so mode 1 never gets `chain_pre_ok`/`chain_ready` and falls back before the device-resident MLA chain. Q2b remains useful evidence that the S=1 mode-2 chain numerics are clean.
+
+Corrected next sequence:
+1. Native ordinary GPU-attention baseline: `CHAIN=0`, `COLI_CUDA_GLM53_ATTN=1`, `ROUTER=1`, `INDEXER=1`, fair residency OFF.
+2. Promote the already-qualified S=1 site-entry path so `CHAIN=1` can actually become authoritative, keeping multi-token prefill on the proven path.
+3. Re-qualify with mode 2, then compare real mode 1 against the ordinary GPU-attention arm.
+
+`fce27ad` also adds opt-in `COLI_CUDA_RESIDENT_LAYER_FAIR=1`; default behavior remains the original global heat admission policy until an A/B run proves the fair policy improves complete-set residency and wall time.

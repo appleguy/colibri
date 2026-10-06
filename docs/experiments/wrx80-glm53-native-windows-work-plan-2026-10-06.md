@@ -444,3 +444,11 @@ Resume the WRX80 native-Windows GLM-5.3 plan from `docs/experiments/wrx80-glm53-
 - With 1,142 resident experts, current global heat gives 24.09% aggregate historical coverage but only 2.40% in the weakest layer and 3..39 experts/layer.
 - Per-layer round-robin gives 23.72% aggregate coverage, 15.90% worst-layer coverage, and 27..28 experts/layer.
 - This makes an opt-in fair/interleaved runtime admission policy the leading N40 candidate, but it should be A/B tested for complete-set coverage and wall time before becoming default.
+
+
+## Matrix correction checkpoint — GPU attention
+
+- B1/B2/B3 used `CHAIN=0` with `COLI_CUDA_GLM53_ATTN` unset. They remain valid N20 router/indexer qualification runs, but sparse MLA attention stayed on CPU and they are not the all-GPU benchmark.
+- The next run is the missing native ordinary GPU-attention arm: `CHAIN=0`, `ATTN=1`, `ROUTER=1`, `INDEXER=1`, fair residency OFF.
+- `CHAIN=1` is not yet an effective production chain because device mHC pre/RMSNorm site entry is still restricted to mode 2; mode 1 therefore never reaches `chain_ready`. Promoting that already-qualified S=1 site-entry path is now an explicit correctness/performance unit before the real resident-chain A/B.
+- `fce27ad` adds opt-in fair resident admission, default-off, validated by CPU/CUDA-linked builds and the RTX backend suite.
