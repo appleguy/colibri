@@ -1260,9 +1260,7 @@ static void mla_layer(const Cfg *c, const GLayer *l, const float *x, int tokens,
     }
     /* Attenzione nello spazio del latente. La scala resta 1/sqrt(qk_nope):
      * il prodotto e' lo stesso numero di prima, calcolato in un altro ordine. */
-    float *context = malloc((size_t)H * V * sizeof(float));
-    float *pooled = malloc((size_t)L * sizeof(float));
-    float *score = malloc((size_t)width * sizeof(float));
+    float *context = NULL, *pooled = NULL, *score = NULL;
     const float scale = 1.0f / sqrtf((float)QK);
 #ifdef COLI_CUDA
     int cuda_attn_mode = getenv("COLI_CUDA_GLM53_ATTN") ? atoi(getenv("COLI_CUDA_GLM53_ATTN")) : 0;
@@ -1297,6 +1295,13 @@ static void mla_layer(const Cfg *c, const GLayer *l, const float *x, int tokens,
         }
     }
 #endif
+    context = malloc((size_t)H * V * sizeof(float));
+    pooled = malloc((size_t)L * sizeof(float));
+    score = malloc((size_t)width * sizeof(float));
+    if (!context || !pooled || !score) {
+        fprintf(stderr, "OOM allocating CPU MLA scratch\n");
+        exit(1);
+    }
     for (int t = 0; t < tokens; t++) {
         const int *chosen = selected + (size_t)t * width;
         for (int h = 0; h < H; h++) {
