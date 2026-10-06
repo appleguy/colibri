@@ -148,6 +148,19 @@ nvcc needs MSVC as host compiler, so this one step must run from a shell with th
 > set PATH=%PATH%;C:\msys64\usr\bin
 > ```
 > (adjust the path if you installed MSYS2 elsewhere). If you skipped MSYS2 in favor of w64devkit or scoop MinGW, point this at wherever `sh.exe` lives.
+>
+> **Portable w64devkit + VS Build Tools:** some POSIX shells do not translate the
+> Windows-style PATH installed by `vcvars64.bat` well enough for
+> `command -v cl`. Current Colibri accepts an explicit, quoted MSVC host
+> compiler path through `NVCC_CCBIN`. After running `vcvars64.bat`, use the
+> x64 `cl.exe` reported by `where cl.exe`, for example:
+> ```cmd
+> set "NVCC_CCBIN=C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/<version>/bin/Hostx64/x64/cl.exe"
+> set "CUDA_HOME=C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9"
+> make cuda-dll CUDA_ARCH=sm_89
+> ```
+> This path was validated on Windows 11 with portable w64devkit, CUDA 12.9,
+> VS 2022 Build Tools and an RTX 4090.
 
 ```cmd
 make cuda-dll CUDA_ARCH=sm_120        # match your GPU: sm_120 Blackwell, sm_89 Ada, ...
