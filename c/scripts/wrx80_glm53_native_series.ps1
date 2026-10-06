@@ -75,10 +75,11 @@ foreach ($run in $cfg.runs) {
   $promptSource = $cfg.prompt_unit * $promptRepeat
   if ($promptChars -gt $promptSource.Length) { throw "prompt_chars $promptChars exceeds generated prompt length $($promptSource.Length)" }
   $prompt = $promptSource.Substring(0, $promptChars)
+  $runModel = if ($run.model) { [string]$run.model } else { [string]$model }
   $stdout = Join-Path $runDir "stdout.log"
   $stderr = Join-Path $runDir "stderr.log"
   $samples = Join-Path $runDir "telemetry.csv"
-  $metadata = [ordered]@{ name=$run.name; start=(Get-Date).ToString("o"); greedy=[int]$run.greedy; env=@{} }
+  $metadata = [ordered]@{ name=$run.name; start=(Get-Date).ToString("o"); greedy=[int]$run.greedy; model=$runModel; env=@{} }
   foreach ($p in $cfg.base_env.PSObject.Properties) { $metadata.env[$p.Name] = [string]$p.Value }
   foreach ($p in $run.env.PSObject.Properties) { $metadata.env[$p.Name] = [string]$p.Value }
   Write-JsonFile (Join-Path $runDir "start.json") $metadata
@@ -86,7 +87,7 @@ foreach ($run in $cfg.runs) {
   Write-Host "[marshal] starting $($run.name)"
   $sw = [Diagnostics.Stopwatch]::StartNew()
   $quotedPrompt = '"' + ($prompt -replace '"','\"') + '"'
-  $procArgs = "--model `"$model`" --prompt $quotedPrompt --greedy $($run.greedy)"
+  $procArgs = "--model `"$runModel`" --prompt $quotedPrompt --greedy $($run.greedy)"
   $proc = Start-Process -FilePath $glm -WorkingDirectory (Join-Path $repo "c") -NoNewWindow -PassThru -ArgumentList $procArgs -RedirectStandardOutput $stdout -RedirectStandardError $stderr
 
   Sample-Run $proc $samples ([int]$cfg.sample_interval_ms)
