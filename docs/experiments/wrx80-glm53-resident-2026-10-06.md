@@ -128,3 +128,17 @@ Living checkpoint log for the dedicated WRX80 / RTX 4090 host. Keep entries smal
 - CUDA MLA: 132 attempts, 132 success, 0 fallback, 1.999 s cumulative GPU wall.
 - Persistent hot tier: 468 grouped calls, 34,473 routed rows, 4,287 expert hits, 56.52 GiB expert-weight H2D avoided, 1.865 s resident GPU wall, 0 fallbacks.
 - Runtime expert disk is effectively eliminated. Remaining performance work should target FFN/device-pipeline continuity and attention/host synchronization, not storage.
+
+
+## 2026-10-06 01:xx PDT — first clean dense-first/full-host-warm probe
+
+Tracked guarded probe `densefirst21-host175-fused`, fixed 551-token prompt and 8 generated tokens, temperature 0:
+
+- Client wall: 115.84 s.
+- Colibri profile: 12 forwards, 75.544 s expert/FFN matmul, 36.027 s attention, 0.079 s expert disk, 1.191 s lm_head.
+- Usage: 551 prompt + 8 completion = 559 tokens; finish_reason length.
+- Before request: 20,673 MiB VRAM used / 3,470 MiB free; about 67.8 GiB MemAvailable; zero swap.
+- After request: 20,737 MiB VRAM used / 3,406 MiB free; zero swap.
+- 15 one-second GPU samples during the request had nonzero SM utilization in 14/15 samples, mostly 7-32% with a 46% peak. This is dramatically better duty cycle than the earlier mostly-idle GPU profile.
+- Storage stalls are effectively eliminated in steady state: expert disk is now ~0.07% of request wall. FFN (~65% of profile wall) is the dominant remaining phase, then attention (~31%).
+- This live process predated commit `039cd68`, so its 171.2 GB host prewarm duplicated VRAM-resident experts. Future restarts skip those duplicates and should reduce startup I/O/RSS without changing steady-state outputs.
