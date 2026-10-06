@@ -294,7 +294,7 @@ Exit criterion:
 
 ## Phase 9 — Native Windows A/B
 
-**Status: HIGH-PRIORITY EXPERIMENT, SMALL PORTABILITY GAP**
+**Status: NATIVE BUILD + CUDA ABI PROVEN; FULL-MODEL A/B DEFERRED WHILE WSL AGENT RUNS**
 
 Rationale:
 - current model source is Windows E: exposed to WSL through drvfs/9p with 64 KiB `msize`;
@@ -302,28 +302,32 @@ Rationale:
 - native Windows Colibri/CUDA is an established supported configuration;
 - repository benchmarks include native-Windows NVMe results up to ~10.6 GB/s on suitable hardware.
 
-What already works in the tree:
-- `glm53.exe` target exists;
-- Windows host uses MinGW;
-- CUDA backend builds as `coli_cuda.dll` via nvcc + MSVC;
-- runtime loader already exposes many resident-pipeline, router, peer-copy and multi-GPU symbols.
+Validated on WRX80 while the production WSL GLM service remained live:
+- portable w64devkit 2.10.0 was installed under `C:\tools` without changing system-wide compiler configuration; its x64 archive SHA-256 was verified before extraction;
+- Windows CUDA 12.9 + Visual Studio 2022 Build Tools / MSVC x64 compile the backend for `sm_89`;
+- native `backend_cuda_test.exe` passed q8/q4/q2/f32/e8 CUDA correctness on the RTX 4090 while WSL retained roughly 20.8 GiB VRAM;
+- CPU-only `glm53.exe ARCH=native` builds and reaches its normal zero-model usage path, selecting 16 physical cores instead of 32 SMT threads;
+- `coli_cuda.dll` builds and exports the current GLM-5.3 sparse-MLA, resident-clamped expert, async resident expert, and pipeline/router symbols;
+- commit `b66b4721` completes the Windows `backend_loader.c` forwarding surface for the optimized GLM-5.3 CUDA ABI;
+- commit `55c818a0` makes the documented portable-w64devkit path honor a quoted explicit `NVCC_CCBIN` MSVC x64 compiler;
+- a tiny native loader smoke successfully `LoadLibrary`/resolves the committed DLL ABI, initializes GPU 0, queries VRAM, and shuts down;
+- a clean Windows checkout reset to committed `55c818a0` builds both `coli_cuda.dll CUDA_ARCH=sm_89` and `glm53.exe CUDA_DLL=1 ARCH=native` end to end in about 14 seconds.
 
-Current portability gap:
-- the newly added GLM-5.3 sparse-attention functions
-  `coli_cuda_attention_absorbed_sparse_batch` and
-  `coli_cuda_attention_absorbed_sparse_project_batch`
-  exist in `backend_cuda.{h,cu}` but are not yet resolved/wrapped by `backend_loader.c`.
-- native Windows therefore needs a small loader/export integration before it can test the current optimized GLM-5.3 branch equivalently.
+Minimal-footprint policy during the live WSL agent run:
+- do not load the ~202 GB production model natively while WSL owns the inference RAM/VRAM working set;
+- no native process should reserve persistent expert VRAM;
+- tiny CUDA correctness/loader tests are acceptable only after checking WSL VRAM headroom;
+- the existing independent GLM-5.3 tiny oracle is attractive for later end-to-end smoke, but generating it requires a pinned PyTorch/Transformers/safetensors environment that is not currently installed; do not pull that heavy dependency stack merely for this coexistence test.
 
-Experiment order:
-1. benchmark storage alone first:
+Remaining experiment order:
+1. after the current WSL agent analysis reaches a safe pause/finish, benchmark storage:
    - Windows native iobench against E:;
    - WSL /mnt/e iobench;
    - WSL ext4 model copy;
-2. patch/validate Windows loader symbols for current GLM-5.3 CUDA additions;
-3. build `glm53.exe CUDA_DLL=1 ARCH=native` and `coli_cuda.dll CUDA_ARCH=sm_89`;
-4. run the exact same deterministic fixed workload and profiling configuration;
-5. compare cold load, host prewarm, prefill, warmed decode, CPU utilization, GPU duty, and total wall time.
+2. run the real production model natively with a deliberately small RAM/VRAM budget first;
+3. run the identical deterministic prefill/decode workload and profiling configuration;
+4. compare cold load, host prewarm, prefill, warmed decode, CPU utilization, GPU duty, and total wall time;
+5. only then increase native Windows RAM/VRAM residency toward the aggressive WRX80 profile.
 
 Decision rule:
 - keep native Windows only if it wins materially after the full host-cache warm state, not merely because cold filesystem reads are faster.
