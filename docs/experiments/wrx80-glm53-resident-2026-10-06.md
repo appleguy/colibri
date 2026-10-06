@@ -24,6 +24,15 @@ Living checkpoint log for the dedicated WRX80 / RTX 4090 host. Keep entries smal
 5. Profile sparse CUDA MLA independently; preserve verify-first behavior until correctness and coverage are established.
 6. Only after the best resident/MLA profile is known, restart the expensive SC64 agent audit.
 
+## 2026-10-06 01:xx PDT — 12 GB / MLA mode 1 live utilization
+
+- Restarted with `COLI_CUDA_RESIDENT_EXPERT_GB=12`, reserve 3 GB, and `COLI_CUDA_GLM53_ATTN=1` so CUDA attention results are used directly instead of double-computing the CPU reference.
+- The richer persisted route history now contains 2,308,320 expert selections.
+- Before the fixed performance request: 12,045 MiB VRAM used / 12,098 MiB free.
+- A 30-second one-second-cadence sample during the request observed only 2/30 samples with nonzero SM utilization (27% and 16%); the remaining 28 samples were 0%. Treat this as a duty-cycle indicator, not precise kernel utilization, but it demonstrates long host-side intervals between CUDA bursts.
+- VRAM increased from about 13.6 GiB to 14.3 GiB during that 30-second interval as lazy CUDA state populated. No swap use was observed.
+- Implication: more resident experts can still reduce weight-transfer stalls, but sustained throughput is currently limited by host-side phases / pipeline discontinuity. Device-resident pipeline work should follow the residency sweep.
+
 
 ## 2026-10-06 01:xx PDT — 12 GB resident + sparse MLA verify qualification
 
