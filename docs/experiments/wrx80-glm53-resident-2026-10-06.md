@@ -69,3 +69,17 @@ Living checkpoint log for the dedicated WRX80 / RTX 4090 host. Keep entries smal
 - The last old 12 GB mode-1 process emitted one-forward profile data before shutdown: attention 9.522 s, FFN 194.730 s, expert disk 177.677 s, head 0.374 s. This is not a clean end-to-end throughput benchmark, but it strongly identifies expert/storage time as dominant.
 - The new 21 GB process spends cold-load time in Linux D state at `p9_client_rpc` while opening shards under `/mnt/e`. The model directory is about 202 GB on the Windows E: 9p mount.
 - Native WSL ext4 has about 932 GB free, enough to stage a complete model copy. After the 21 GB VRAM measurement, A/B the same fixed workload from a native-ext4 model path before further kernel micro-optimization. Do not copy during a timing run because it would contend with the model reads.
+
+
+## 2026-10-06 01:27 PDT — direct 21 GB stress qualification
+
+- Skipped the intermediate 16/18 GB ladder per user direction and restarted directly with `COLI_CUDA_RESIDENT_EXPERT_GB=21`, reserve 3 GB, sparse MLA mode 1.
+- Startup placement admitted 1,483 hot experts using 19.55 GiB persistent VRAM. The live placement guard stopped with 2.90 GiB free rather than blindly reaching the nominal 21 GB budget.
+- Lazy dense/MLA allocations during the first request consumed almost all of that startup reserve: total VRAM reached 24,123 MiB used with only about 20 MiB free.
+- Despite that extreme occupancy, the first two forwards completed without CUDA allocation failure or WSL swap use.
+- Rolling counters after forward 1: attention 16.247 s, FFN 182.439 s, expert disk 165.843 s, head 2.761 s.
+- Rolling counters after forward 2: attention 34.842 s, FFN 235.208 s, expert disk 201.328 s, head 5.296 s. Incremental forward 2 was therefore about 18.595 s attention, 52.769 s FFN, 35.485 s disk, 2.535 s head.
+- Decode showed bursty but real GPU utilization; a point sample reached 83% SM utilization.
+- The 8-token probe was intentionally cancelled after two successful forwards instead of spending several more minutes proving the same VRAM reuse property.
+- Conclusion: 21 GB is stress-viable, but the startup reserve guard is not post-lazy-aware. Keep the user-visible 21 GB target, but future policy should reserve expected lazy CUDA state before expert admission.
+- The next dominant problem is host expert-cache warming: first-forward disk time is much larger than attention. On this dedicated high-RAM host, enable `GLM53_PREWARM_EXPERTS=1` and size `GLM53_EXPERT_GB` aggressively enough to hold essentially/all routed experts before re-benchmarking.
