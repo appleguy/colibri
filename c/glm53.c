@@ -3059,11 +3059,15 @@ static float *ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
     if (shared_t0) m->t_moe_shared += now_s() - shared_t0;
 #ifdef COLI_CUDA
     float *shared_out_dev = NULL;
-    if (tokens == 1 && x_dev && cuda_chain_mode() == 2) {
-        float *shared_dev = malloc((size_t)c->hidden * sizeof(float));
-        if (!shared_dev) { fprintf(stderr, "OOM allocating shared expert verification row\n"); exit(1); }
+    const int chain_mode = cuda_chain_mode();
+    if (tokens == 1 && x_dev && chain_mode > 0) {
+        float *shared_dev = chain_mode == 2
+            ? malloc((size_t)c->hidden * sizeof(float)) : NULL;
+        if (chain_mode == 2 && !shared_dev) {
+            fprintf(stderr, "OOM allocating shared expert verification row\n"); exit(1);
+        }
         shared_out_dev = cuda_shared_mlp_dev(m, (GLayer *)l, x_dev);
-        if (shared_out_dev &&
+        if (chain_mode == 2 && shared_out_dev &&
             coli_cuda_pipe_download(g_cuda_device, shared_out_dev, shared_dev,
                                     (size_t)c->hidden * sizeof(float))) {
             float max_abs = 0.0f, max_rel = 0.0f;
@@ -3115,7 +3119,7 @@ static float *ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
     }
 
 #ifdef COLI_CUDA
-    const int track_resident_set = tokens == 1 && x_dev && cuda_chain_mode() == 2;
+    const int track_resident_set = tokens == 1 && x_dev && chain_mode > 0;
     if (track_resident_set) m->gpu_decode_resident_sets++;
     float *complete_dev = NULL;
     /* Persistent VRAM residents are computed first into an atomic scratch
@@ -3124,7 +3128,7 @@ static float *ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
      * the exact old path. */
     if (g_cuda_ready && m->gpu_expert_count > 0 && n_union > 0) {
         float *resident_before = NULL, *resident_dev = NULL;
-        if (tokens == 1 && x_dev && cuda_chain_mode() == 2) {
+        if (tokens == 1 && x_dev && chain_mode == 2) {
             resident_before = malloc((size_t)c->hidden * sizeof(float));
             resident_dev = malloc((size_t)c->hidden * sizeof(float));
             if (!resident_before || !resident_dev) {
@@ -3138,10 +3142,10 @@ static float *ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
         const int resident_ok = cuda_resident_moe(
             m, index, union_ids, n_union, chosen, weight, tokens, topk, x, out, handled);
         if (resident_ok) {
-            float *resident_out_dev = resident_before
+            float *resident_out_dev = (tokens == 1 && x_dev && chain_mode > 0)
                 ? cuda_resident_moe_dev(m, index, chosen, weight, topk, x_dev)
                 : NULL;
-            if (resident_out_dev &&
+            if (chain_mode == 2 && resident_out_dev &&
                 coli_cuda_pipe_download(g_cuda_device, resident_out_dev, resident_dev,
                                         (size_t)c->hidden * sizeof(float))) {
                 float max_abs = 0.0f, max_rel = 0.0f;
@@ -3161,9 +3165,10 @@ static float *ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
                     resident_verify_reports++;
                 }
             }
-            if (shared_out_dev && resident_out_dev &&
+            const int combined_dev_ok = shared_out_dev && resident_out_dev &&
                 coli_cuda_pipe_add(g_cuda_device, shared_out_dev, resident_out_dev,
-                                   (size_t)c->hidden) &&
+                                   (size_t)c->hidden);
+            if (chain_mode == 2 && combined_dev_ok &&
                 coli_cuda_pipe_download(g_cuda_device, shared_out_dev, resident_dev,
                                         (size_t)c->hidden * sizeof(float))) {
                 float max_abs = 0.0f, max_rel = 0.0f;
@@ -3186,7 +3191,7 @@ static float *ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
             for (int i = 0; i < n_union; i++)
                 if (!handled[i]) union_ids[keep++] = union_ids[i];
             n_union = keep;
-            if (n_union == 0 && shared_out_dev && resident_out_dev) {
+            if (n_union == 0 && combined_dev_ok) {
                 complete_dev = shared_out_dev;
                 if (track_resident_set) m->gpu_decode_all_resident_sets++;
             }
@@ -3779,14 +3784,13 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                 rms(normed + (size_t)t * D, collapsed + (size_t)t * D,
                     site ? l->post_ln : l->in_ln, D, c->eps);
 #ifdef COLI_CUDA
-            /* Qualification-only site-entry path. CPU pre/norm stays
-             * authoritative; the device path uses resident site weights and
-             * keeps residual/post/comb/normed buffers reusable by the rest of
-             * this site. */
+            /* S=1 device site-entry path. Mode 2 keeps CPU pre/norm as the
+             * oracle; mode 1 uses the same qualified device pre/norm path
+             * authoritatively while preserving a synchronized host residual. */
             float *chain_residual_dev = NULL, *chain_post_dev = NULL;
             float *chain_comb_dev = NULL, *chain_normed_dev = NULL;
             int chain_pre_ok = 0;
-            if (chain_mode == 2 && g_cuda_ready && cuda_hc_site_prepare(m, l, site)) {
+            if (chain_mode > 0 && g_cuda_ready && cuda_hc_site_prepare(m, l, site)) {
                 const size_t residual_b = (size_t)n * H * D * sizeof(float);
                 const size_t post_b = (size_t)n * H * sizeof(float);
                 const size_t comb_b = (size_t)n * H * H * sizeof(float);
@@ -3814,14 +3818,16 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                                    n, H, D, c->hc_iters, c->eps, c->hc_eps) &&
                                coli_cuda_pipe_rmsnorm(
                                    g_cuda_device, chain_normed_dev, pre_collapsed_dev,
-                                   (const float *)l->hc_norm_cuda[site], n, D, c->eps) &&
-                               coli_cuda_pipe_download(g_cuda_device, chain_normed_dev,
-                                                       chain_pre_norm_verify, collapsed_b) &&
-                               coli_cuda_pipe_download(g_cuda_device, chain_post_dev,
-                                                       chain_pre_post_verify, post_b) &&
-                               coli_cuda_pipe_download(g_cuda_device, chain_comb_dev,
-                                                       chain_pre_comb_verify, comb_b);
-                if (chain_pre_ok) {
+                                   (const float *)l->hc_norm_cuda[site], n, D, c->eps);
+                if (chain_pre_ok && chain_mode == 2)
+                    chain_pre_ok =
+                        coli_cuda_pipe_download(g_cuda_device, chain_normed_dev,
+                                                chain_pre_norm_verify, collapsed_b) &&
+                        coli_cuda_pipe_download(g_cuda_device, chain_post_dev,
+                                                chain_pre_post_verify, post_b) &&
+                        coli_cuda_pipe_download(g_cuda_device, chain_comb_dev,
+                                                chain_pre_comb_verify, comb_b);
+                if (chain_pre_ok && chain_mode == 2) {
                     float max_norm_abs = 0.0f, max_norm_rel = 0.0f;
                     float max_post_abs = 0.0f, max_comb_abs = 0.0f;
                     for (size_t q = 0; q < (size_t)n * D; q++) {
@@ -3891,7 +3897,7 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                 const float *ffn_input =
                     (chain_mode == 2 && chain_pre_ok) ? chain_pre_norm_verify : normed;
                 const float *ffn_input_dev =
-                    (chain_mode == 2 && chain_pre_ok) ? chain_normed_dev : NULL;
+                    (chain_mode > 0 && chain_pre_ok) ? chain_normed_dev : NULL;
                 float *ffn_branch_dev =
                     ffn_layer(m, l, i, ffn_input, ffn_input_dev, n, branch);
                 if (ffn_branch_dev && chain_pre_ok) {
@@ -3912,6 +3918,10 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
             profile_vram_sample(m);
             int post_done = 0;
 #ifdef COLI_CUDA
+            if (chain_branch_ok && chain_mode == 1 && !site)
+                chain_branch_ok = coli_cuda_pipe_download(
+                    g_cuda_device, chain_branch_dev, branch,
+                    (size_t)n * D * sizeof(float));
             if (chain_branch_ok) {
                 int gpu_post_ok = 1;
                 for (int t = 0; t < n; t++) {
@@ -3924,37 +3934,44 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                         chain_comb_dev + (size_t)t * H * H,
                         H, D);
                 }
-                /* Verification mode keeps the CPU post authoritative, then
-                 * compares the whole residual bank after one D2H. */
-                for (int t = 0; t < n; t++)
-                    coli_hc_post(next + (size_t)t * H * D, branch + (size_t)t * D,
-                                 streams + (size_t)t * H * D, post + (size_t)t * H,
-                                 comb + (size_t)t * H * H, H, D);
-                post_done = 1;
-                if (gpu_post_ok) {
+                if (chain_mode == 2) {
+                    /* Verification mode keeps the CPU post authoritative, then
+                     * compares the whole residual bank after one D2H. */
+                    for (int t = 0; t < n; t++)
+                        coli_hc_post(next + (size_t)t * H * D, branch + (size_t)t * D,
+                                     streams + (size_t)t * H * D, post + (size_t)t * H,
+                                     comb + (size_t)t * H * H, H, D);
+                    post_done = 1;
+                    if (gpu_post_ok && coli_cuda_pipe_download(
+                            g_cuda_device, chain_next_dev, chain_verify,
+                            (size_t)n * H * D * sizeof(float))) {
+                        float max_abs = 0.0f, max_rel = 0.0f;
+                        for (size_t q = 0; q < (size_t)n * H * D; q++) {
+                            float da = fabsf(chain_verify[q] - next[q]);
+                            float dr = da / (fabsf(next[q]) + 1e-6f);
+                            if (da > max_abs) max_abs = da;
+                            if (dr > max_rel) max_rel = dr;
+                        }
+                        static int chain_reports = 0;
+                        if (chain_reports < 16) {
+                            fprintf(stderr,
+                                    "[CUDA] GLM53 chain verify layer=%d start=%d n=%d "
+                                    "max_abs=%.6g max_rel=%.6g\n",
+                                    i, start, n, max_abs, max_rel);
+                            chain_reports++;
+                        }
+                    }
+                } else if (gpu_post_ok &&
+                           coli_cuda_pipe_download(
+                               g_cuda_device, chain_next_dev, next,
+                               (size_t)n * H * D * sizeof(float))) {
+                    post_done = 1;
+                }
+                if (gpu_post_ok && post_done) {
                     resident_streams_dev = chain_next_dev;
                     resident_streams_valid = 1;
                 } else {
                     resident_streams_valid = 0;
-                }
-                if (gpu_post_ok && coli_cuda_pipe_download(
-                        g_cuda_device, chain_next_dev, chain_verify,
-                        (size_t)n * H * D * sizeof(float))) {
-                    float max_abs = 0.0f, max_rel = 0.0f;
-                    for (size_t q = 0; q < (size_t)n * H * D; q++) {
-                        float da = fabsf(chain_verify[q] - next[q]);
-                        float dr = da / (fabsf(next[q]) + 1e-6f);
-                        if (da > max_abs) max_abs = da;
-                        if (dr > max_rel) max_rel = dr;
-                    }
-                    static int chain_reports = 0;
-                    if (chain_reports < 16) {
-                        fprintf(stderr,
-                                "[CUDA] GLM53 chain verify layer=%d start=%d n=%d "
-                                "max_abs=%.6g max_rel=%.6g\n",
-                                i, start, n, max_abs, max_rel);
-                        chain_reports++;
-                    }
                 }
             }
 #endif
