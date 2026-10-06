@@ -2026,7 +2026,11 @@ static void expert_cache_prewarm(GModel *m) {
         int nc = 0;
         for (int eid = 0; eid < m->c.n_experts; eid++) {
 #ifdef COLI_CUDA
-            if (cache->cap < m->c.n_experts && m->gpu_expert &&
+            /* VRAM-resident experts are already warm by definition. Do not
+             * spend host/page-cache budget prewarming a duplicate copy even
+             * when this LRU could hold the entire layer; CPU fallback can
+             * still load one lazily if a resident CUDA dispatch ever fails. */
+            if (m->gpu_expert &&
                 m->gpu_expert[(size_t)layer * m->c.n_experts + eid].resident)
                 continue;
 #endif
