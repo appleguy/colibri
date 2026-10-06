@@ -633,6 +633,42 @@ int main(int argc, char **argv) {
     }
     coli_cuda_tensor_free(cg4);coli_cuda_tensor_free(cu4);coli_cuda_tensor_free(cd4);
     coli_cuda_tensor_free(g4);coli_cuda_tensor_free(u4);coli_cuda_tensor_free(d4);
+
+    /* GLM-5.3 decode router contract: correction bias changes selection, while
+     * the normalized route weights come from the raw sigmoid logits. */
+    {
+        constexpr int D=4,E=4,K=2;
+        float rx[D]={1.f,2.f,3.f,4.f};
+        float rw[E*D]={
+            1.f,0.f,0.f,0.f,
+            0.f,1.f,0.f,0.f,
+            0.f,0.f,1.f,0.f,
+            0.f,0.f,0.f,1.f
+        };
+        float rb[E]={0.5f,0.f,0.f,0.f};
+        float *xd=(float*)coli_cuda_pipe_alloc(d0,sizeof(rx));
+        float *wd=(float*)coli_cuda_pipe_alloc(d0,sizeof(rw));
+        float *bd=(float*)coli_cuda_pipe_alloc(d0,sizeof(rb));
+        int idx[K]={-1,-1},keff=0; float ww[K]={0,0};
+        const float l0=1.f/(1.f+std::exp(-1.f));
+        const float l3=1.f/(1.f+std::exp(-4.f));
+        const float z=l0+l3+1e-20f;
+        if(!xd||!wd||!bd||
+           !coli_cuda_pipe_upload(d0,xd,rx,sizeof(rx))||
+           !coli_cuda_pipe_upload(d0,wd,rw,sizeof(rw))||
+           !coli_cuda_pipe_upload(d0,bd,rb,sizeof(rb))||
+           !coli_cuda_pipe_router(d0,xd,wd,bd,D,E,K,0.f,1,2.5f,idx,ww,&keff)||
+           keff!=K||idx[0]!=0||idx[1]!=3||
+           std::fabs(ww[0]-l0/z*2.5f)>1e-5f||
+           std::fabs(ww[1]-l3/z*2.5f)>1e-5f){
+            std::fprintf(stderr,"CUDA GLM router contract mismatch\n");
+            return 1;
+        }
+        coli_cuda_pipe_free(d0,bd);
+        coli_cuda_pipe_free(d0,wd);
+        coli_cuda_pipe_free(d0,xd);
+    }
+
     uint64_t group_calls=0,group_experts=0,group_total_rows=0;
     coli_cuda_group_stats(&group_calls,&group_experts,&group_total_rows,nullptr,nullptr,nullptr);
     if(group_calls!=9||group_experts!=17||group_total_rows!=17) return 1;

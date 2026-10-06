@@ -683,6 +683,10 @@ typedef struct {
     Mat dg, du, dd;                       /* denso */
     Mat rg, ru, rd;                       /* router / shared: gate,up,down */
     const float *router, *rbias;
+#ifdef COLI_CUDA
+    void *router_cuda, *rbias_cuda;       /* lazy f32 router residency for S=1 decode */
+    unsigned char router_cuda_bad;
+#endif
     Mat *eg, *eu, *ed;                    /* esperti routed */
 } GLayer;
 
@@ -744,6 +748,7 @@ typedef struct {
     size_t gpu_vram_peak_used, gpu_vram_min_free, gpu_vram_total;
     int *gpu_resident_pos, *gpu_resident_row_ids;
     float *gpu_resident_row_weights, *gpu_resident_xg, *gpu_resident_tmp, *gpu_resident_acc;
+    float *gpu_router_x;
     size_t gpu_resident_rows_cap, gpu_resident_union_cap, gpu_resident_tokens_cap;
 #endif
     /* Telemetria per la dashboard (#1376 follow-up: Brain e Profile erano
@@ -766,6 +771,19 @@ static int profile_enabled(void) {
     static int enabled = -1;
     if (enabled < 0) enabled = getenv("PROF") != NULL;
     return enabled;
+}
+
+static int cuda_router_mode(void) {
+#ifdef COLI_CUDA
+    static int mode = -1;
+    if (mode < 0) {
+        const char *s = getenv("COLI_CUDA_GLM53_ROUTER");
+        mode = s && *s ? atoi(s) : 0;
+    }
+    return mode;
+#else
+    return 0;
+#endif
 }
 
 static void profile_vram_sample(GModel *m) {
@@ -1399,6 +1417,53 @@ static void mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
 }
 
 /* ---------- FFN: denso oppure MoE ---------- */
+#ifdef COLI_CUDA
+static int cuda_router_try(GModel *m, GLayer *l, const float *row,
+                           int *chosen, float *weight, int topk) {
+    const Cfg *c = &m->c;
+    if (cuda_router_mode() <= 0 || !g_cuda_ready || !row || !chosen || !weight ||
+        !l->router || !l->rbias || l->router_cuda_bad ||
+        c->n_experts < 1 || c->n_experts > 4096 || topk < 1 || topk > 64)
+        return 0;
+
+    if (!l->router_cuda || !l->rbias_cuda) {
+        void *rw = coli_cuda_pipe_alloc(g_cuda_device,
+                                        (size_t)c->n_experts * c->hidden * sizeof(float));
+        void *rb = coli_cuda_pipe_alloc(g_cuda_device,
+                                        (size_t)c->n_experts * sizeof(float));
+        if (!rw || !rb ||
+            !coli_cuda_pipe_upload(g_cuda_device, rw, l->router,
+                                   (size_t)c->n_experts * c->hidden * sizeof(float)) ||
+            !coli_cuda_pipe_upload(g_cuda_device, rb, l->rbias,
+                                   (size_t)c->n_experts * sizeof(float))) {
+            if (rw) coli_cuda_pipe_free(g_cuda_device, rw);
+            if (rb) coli_cuda_pipe_free(g_cuda_device, rb);
+            l->router_cuda_bad = 1;
+            return 0;
+        }
+        l->router_cuda = rw;
+        l->rbias_cuda = rb;
+    }
+    if (!m->gpu_router_x) {
+        m->gpu_router_x = (float *)coli_cuda_pipe_alloc(
+            g_cuda_device, (size_t)c->hidden * sizeof(float));
+        if (!m->gpu_router_x) return 0;
+    }
+    if (!coli_cuda_pipe_upload(g_cuda_device, m->gpu_router_x, row,
+                               (size_t)c->hidden * sizeof(float)))
+        return 0;
+
+    int keff = 0;
+    if (!coli_cuda_pipe_router(g_cuda_device, m->gpu_router_x,
+                               l->router_cuda, l->rbias_cuda,
+                               c->hidden, c->n_experts, topk,
+                               0.0f, 1, c->routed_scale,
+                               chosen, weight, &keff))
+        return 0;
+    return keff == topk;
+}
+#endif
+
 /* ================= streaming degli esperti =================
  *
  * 288 esperti per 42 layer sparsi, 14,2 MB l'uno in int4 gs64: 171 GB, che
@@ -2531,7 +2596,12 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
 
     /* --- primo tempo: il router, per ogni token --- */
     const double router_t0 = profile_enabled() ? now_s() : 0.0;
-    for (int t = 0; t < tokens; t++) {
+    int cuda_routed = 0;
+#ifdef COLI_CUDA
+    if (tokens == 1)
+        cuda_routed = cuda_router_try(m, (GLayer *)l, x, chosen, weight, topk);
+#endif
+    for (int t = cuda_routed ? tokens : 0; t < tokens; t++) {
         const float *row = x + (size_t)t * c->hidden;
         for (int e = 0; e < c->n_experts; e++) {
             const float *w = l->router + (size_t)e * c->hidden;
@@ -2564,6 +2634,7 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
          * this layer. The shared helper also bumps .coli_usage counters. */
         rt_route(index, t, mine, mine_w, topk);
     }
+    if (cuda_routed) rt_route(index, 0, chosen, weight, topk);
     rt_trace_end();
     if (router_t0) m->t_router += now_s() - router_t0;
     free(score);
@@ -3242,6 +3313,10 @@ static void model_release(GModel *m) {
                             &l->iwp, &l->ikpg, &l->dg, &l->du, &l->dd,
                             &l->rg, &l->ru, &l->rd };
             for (size_t k = 0; k < sizeof(mats) / sizeof(*mats); k++) mat_release(mats[k]);
+#ifdef COLI_CUDA
+            if (l->router_cuda) coli_cuda_pipe_free(g_cuda_device, l->router_cuda);
+            if (l->rbias_cuda) coli_cuda_pipe_free(g_cuda_device, l->rbias_cuda);
+#endif
             const float *vectors[] = { l->in_ln, l->post_ln, l->hc_attn_fn,
                                        l->hc_attn_base, l->hc_attn_scale,
                                        l->hc_ffn_fn, l->hc_ffn_base, l->hc_ffn_scale,
@@ -3272,6 +3347,7 @@ static void model_release(GModel *m) {
     free(m->gpu_resident_xg);
     free(m->gpu_resident_tmp);
     free(m->gpu_resident_acc);
+    if (m->gpu_router_x) coli_cuda_pipe_free(g_cuda_device, m->gpu_router_x);
 #endif
     if (m->ecache) {
         for (int i = 0; i < m->c.n_layers; i++) {
