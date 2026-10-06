@@ -3481,7 +3481,7 @@ extern "C" int coli_cuda_pipe_hc_post(int device,float *out_dev,
     if(!out_dev||!branch_dev||!residual_dev||!post_dev||!comb_dev||
        hc<1||hc>8||D<1||!select_ctx(ctx)) return 0;
     size_t n=(size_t)hc*D;
-    pipe_hc_post_kernel<<<(unsigned)((n+255)/256),256>>>(
+    pipe_hc_post_kernel<<<(unsigned)((n+255)/256),256,0,ctx->stream>>>(
         out_dev,branch_dev,residual_dev,post_dev,comb_dev,hc,D);
     return cuda_ok(cudaGetLastError(),"pipe hyperconnection post");
 }
