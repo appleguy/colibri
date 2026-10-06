@@ -22,7 +22,8 @@ Living checkpoint log for the dedicated WRX80 / RTX 4090 host. Keep entries smal
 3. If clean, step 16 -> 18 -> 20 GiB. Stop on CUDA allocation/refusal, output mismatch, swap growth, or live free VRAM below reserve.
 4. Compare fixed prefill-heavy and decode-heavy requests across CPU-only, legacy hybrid, and resident hybrid after the residency sweep.
 5. Profile sparse CUDA MLA independently; preserve verify-first behavior until correctness and coverage are established.
-6. Only after the best resident/MLA profile is known, restart the expensive SC64 agent audit.
+6. Sweep `GLM53_PREFILL_CHUNK=128/256/512` on the fixed prompt once rolling phase counters are available. The dedicated host has ample RAM; larger chunks may amortize expert/cache work substantially while remaining well inside activation-memory limits.
+7. Only after the best resident/MLA/prefill-chunk profile is known, restart the expensive SC64 agent audit.
 
 ## 2026-10-06 01:xx PDT — 12 GB / MLA mode 1 live utilization
 
