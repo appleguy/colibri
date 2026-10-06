@@ -2077,7 +2077,7 @@ static int expert_group_impl(ColiCudaTensor *const *gates,
      * Upload converts packed nibbles on the legacy stream; wait once before
      * the non-blocking grouped stream consumes those weights. */
     if(swiglu_limit>0.f && !weights_preuploaded &&
-       !cuda_ok(cudaDeviceSynchronize(),"clamped expert upload synchronize")) return 0;
+       !cuda_ok(cudaStreamSynchronize(0),"clamped expert upload synchronize")) return 0;
     if(!prepare_group_weights(ctx,gates,ups,downs,count,host)) return 0;
     size_t xb=(size_t)total*D*sizeof(float), ib=(size_t)total*I*sizeof(float);
     if(!reserve(&ctx->x,&ctx->x_cap,xb)||!reserve(&ctx->y,&ctx->y_cap,xb)||
