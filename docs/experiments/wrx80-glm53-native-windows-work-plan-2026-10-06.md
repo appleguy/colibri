@@ -436,3 +436,11 @@ Resume the WRX80 native-Windows GLM-5.3 plan from `docs/experiments/wrx80-glm53-
 - N20 short-run qualification is complete. The next serialized medium-context gate remains blocked until N30 telemetry is collected.
 - `bf8d61a` implements N30 sparse-boundary telemetry behind `COLI_CUDA_SPARSE_PROFILE=1` with no public ABI change. Native CUDA numerical tests, CPU/CUDA-linked builds, and the 12-test loader fixture all pass.
 - Active cursor: run one short authoritative profile arm with N30 enabled, then select the next optimization from measured `index_wait`, `stage_wait`, `pack`, and `h2d_enqueue` contribution. N40 remains the next independent lane if those costs are small.
+
+
+## N40 checkpoint — residency policy simulation
+
+- `93e68b2` adds an offline `.coli_usage` simulator for equal-budget resident admission policies.
+- With 1,142 resident experts, current global heat gives 24.09% aggregate historical coverage but only 2.40% in the weakest layer and 3..39 experts/layer.
+- Per-layer round-robin gives 23.72% aggregate coverage, 15.90% worst-layer coverage, and 27..28 experts/layer.
+- This makes an opt-in fair/interleaved runtime admission policy the leading N40 candidate, but it should be A/B tested for complete-set coverage and wall time before becoming default.

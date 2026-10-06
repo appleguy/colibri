@@ -503,3 +503,16 @@ Validation for `bf8d61a`:
 - Windows loader fixture: 12/12 tests passed.
 
 Next: run one short authoritative B3-equivalent arm with `COLI_CUDA_SPARSE_PROFILE=1`, use those measurements to choose the next attention optimization, then proceed to N40 residency policy work if the sparse boundary is not dominant.
+
+
+### N40 offline residency-policy simulation — 2026-10-06
+
+`93e68b2` adds `c/scripts/wrx80_glm53_residency_sim.py`, which reads the text `.coli_usage` history and compares equal-budget admission policies without touching runtime.
+
+At the current 1,142-expert resident budget across 42 routed layers:
+- current global-heat admission: **24.09%** total historical selection mass, worst layer **2.40%**, median layer **25.90%**, 3..39 resident experts/layer;
+- per-layer round-robin by local heat rank: **23.72%** total mass, worst layer **15.90%**, median layer **23.88%**, 27..28 resident experts/layer.
+
+So a fair per-layer allocation sacrifices only ~0.37 percentage points of aggregate historical hit mass while improving the weakest layer by ~6.6x. This is a strong candidate for increasing complete expert-set residency, which the current global policy has measured at 0% in short decode runs.
+
+Next N40 runtime step should be opt-in first: implement a fair/interleaved admission mode, preserve the global policy as baseline, and A/B complete-set coverage + wall time before changing defaults.
