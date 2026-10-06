@@ -1,0 +1,92 @@
+{
+  "repo": "E:\\z-src\\colibri-native",
+  "model": "E:\\z-models\\GLM-5.3-Flash-colibri-int4-g64",
+  "results_root": "E:\\z-results\\glm53-full-comparison-2026-10-06",
+  "sample_interval_ms": 250,
+  "prompt_unit": "Analyze this deterministic systems-programming trace. Track ownership, synchronization, memory movement, cache residency, latency, throughput, and correctness. Explain interactions precisely. ",
+  "prompt_repeat": 20,
+  "prompt_chars": 3400,
+  "base_env": {
+    "OMP_NUM_THREADS": "16",
+    "COLI_CUDA": "1",
+    "COLI_CUDA_RESIDENT_EXPERT_GB": "18",
+    "COLI_CUDA_RESIDENT_RESERVE_GB": "3",
+    "GLM53_PREWARM_EXPERTS": "1",
+    "GLM53_EXPERT_GB": "175",
+    "GLM53_PROFILE_VRAM": "1",
+    "GLM53_PROF_EVERY": "1",
+    "PROF": "1",
+    "COLI_CUDA_GLM53_CHAIN": "0",
+    "COLI_CUDA_GLM53_ATTN": "1",
+    "COLI_CUDA_GLM53_ROUTER": "1",
+    "COLI_CUDA_GLM53_INDEXER": "1",
+    "COLI_CUDA_SPARSE_PROFILE": "0"
+  },
+  "runs": [
+    {
+      "name": "flash-control-fair-g8",
+      "enabled": true,
+      "greedy": 8,
+      "env": {
+        "COLI_CUDA_RESIDENT_LAYER_FAIR": "1"
+      },
+      "precondition_file": "E:\\z-results\\glm53-native-2026-10-06\\chain2-requal-approved.txt",
+      "precondition_require": ["PASS"],
+      "require": ["decode 8 token", "indexer authoritative q=.*ok=1", "\\[STATS\\]"],
+      "forbid": ["fallback=[1-9]", "CUDA error", "engine_error"],
+      "stop_on_failure": true
+    },
+    {
+      "name": "full-smoke-global-g1",
+      "enabled": true,
+      "model": "E:\\z-models\\GLM-5.3-colibri-int4-g64",
+      "greedy": 1,
+      "env": {
+        "COLI_CUDA_RESIDENT_LAYER_FAIR": "0"
+      },
+      "require": ["decode 1 token", "\\[STATS\\]"],
+      "forbid": ["CUDA error", "engine_error", "missing tensor", "config.json:"],
+      "stop_on_failure": true
+    },
+    {
+      "name": "full-global-g8",
+      "enabled": true,
+      "model": "E:\\z-models\\GLM-5.3-colibri-int4-g64",
+      "greedy": 8,
+      "env": {
+        "COLI_CUDA_RESIDENT_LAYER_FAIR": "0"
+      },
+      "require": ["decode 8 token", "\\[STATS\\]"],
+      "forbid": ["CUDA error", "engine_error", "missing tensor", "config.json:"],
+      "stop_on_failure": true
+    },
+    {
+      "name": "full-fair-g8",
+      "enabled": true,
+      "model": "E:\\z-models\\GLM-5.3-colibri-int4-g64",
+      "greedy": 8,
+      "env": {
+        "COLI_CUDA_RESIDENT_LAYER_FAIR": "1"
+      },
+      "require": ["decode 8 token", "\\[STATS\\]"],
+      "forbid": ["CUDA error", "engine_error", "missing tensor", "config.json:"],
+      "stop_on_failure": true
+    },
+    {
+      "name": "full-fair-medium-32kchars-g8",
+      "enabled": false,
+      "note": "Enable after the short full-model runs pass and a winner between global/fair residency is selected.",
+      "model": "E:\\z-models\\GLM-5.3-colibri-int4-g64",
+      "prompt_repeat": 220,
+      "prompt_chars": 32000,
+      "greedy": 8,
+      "env": {
+        "COLI_CUDA_RESIDENT_LAYER_FAIR": "1",
+        "COLI_CUDA_SPARSE_PROFILE": "1"
+      },
+      "require": ["decode 8 token", "\\[STATS\\]"],
+      "forbid": ["CUDA error", "engine_error", "missing tensor", "config.json:"],
+      "stop_on_failure": true
+    }
+  ]
+}
