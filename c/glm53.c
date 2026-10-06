@@ -738,6 +738,7 @@ typedef struct {
     int gpu_expert_count;
     uint64_t gpu_expert_calls, gpu_expert_rows, gpu_expert_hits, gpu_expert_fallback;
     uint64_t gpu_expert_avoided_h2d_bytes;
+    double gpu_expert_seconds;
 #endif
     /* Telemetria per la dashboard (#1376 follow-up: Brain e Profile erano
      * vuoti su Flash perche' il motore non emetteva nulla). Tempi di fase
@@ -2119,11 +2120,13 @@ static int cuda_resident_moe(GModel *m, int layer,
             groups++;
         }
 
+        const double resident_t0 = groups ? now_s() : 0.0;
         if (groups && !coli_cuda_expert_group_clamped_resident(
                 gate, up, down, rows, groups, tmp, xg, m->c.swiglu_limit)) {
             ok = 0;
             break;
         }
+        if (groups) m->gpu_expert_seconds += now_s() - resident_t0;
         if (groups) {
             int off = 0;
             for (int g = 0; g < groups; g++) {
@@ -4071,13 +4074,14 @@ static void hits_emit(GModel *m) {
         fprintf(stderr,
                 "[CUDA] GLM53 hot tier cumulative: %d experts %.2f GiB VRAM | "
                 "%llu grouped calls %llu routed rows %llu expert hits | "
-                "%.2f GiB weight H2D avoided | %llu fallbacks\n",
+                "%.2f GiB weight H2D avoided | %.3f s resident GPU wall | %llu fallbacks\n",
                 m->gpu_expert_count,
                 m->gpu_expert_vram / (double)(1ull << 30),
                 (unsigned long long)m->gpu_expert_calls,
                 (unsigned long long)m->gpu_expert_rows,
                 (unsigned long long)m->gpu_expert_hits,
                 m->gpu_expert_avoided_h2d_bytes / (double)(1ull << 30),
+                m->gpu_expert_seconds,
                 (unsigned long long)m->gpu_expert_fallback);
     }
 #endif
