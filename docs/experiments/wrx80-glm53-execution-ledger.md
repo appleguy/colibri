@@ -158,13 +158,14 @@ Exit:
 ### U40 — GPU sparse indexer + persistent attention state
 **Class:** P
 **Depends on:** U20 device-resident activation conventions
-**Status:** ACTIVE / DECODE PRIMITIVE IMPLEMENTED, NOT YET WIRED
+**Status:** ACTIVE / DECODE QUALIFICATION WIRED, NOT AUTHORITATIVE
 **Priority:** P1
 
 Goal: remove the remaining CPU-side sparse-index construction and attention-state traffic.
 
 Completed checkpoints:
 - `8aac5c2d` adds an exact decode-first CUDA sparse-index primitive matching `coli_sparse_index_select_range` for leading padding, complete pools, deterministic top-k selection, and incomplete-tail emission. RTX 4090 numerical parity, CPU GLM build, CUDA-linked GLM build, and Linux header/loader parity pass. The public CUDA ABI is wired as mandatory (`58 mandatory + 9 optional`); the Windows-invoked loader fixture still self-skips its Windows-only classes in this environment, so full native DLL fixture execution remains a later qualification item. The primitive is not yet called by GLM inference.
+- `906ed70c` wires opt-in `COLI_CUDA_GLM53_INDEXER=2` qualification for S=1 decode. CPU sparse selection remains authoritative; the CUDA indexer recomputes the same 2051-slot selection and reports exact integer parity with cumulative pass/mismatch/failure counters. CPU/CUDA-linked GLM builds and the RTX CUDA backend suite pass. Mode 1 authoritative routing is intentionally deferred until a real-model verification run shows clean parity.
 
 Work:
 - persistent latent/KV/index state in VRAM where capacity permits;
