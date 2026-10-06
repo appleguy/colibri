@@ -101,9 +101,9 @@ Completed checkpoints:
 - `54887458` wires a verification-only real-geometry **mHC pre -> GPU RMSNorm** caller path under `COLI_CUDA_GLM53_CHAIN=2`. It recomputes attention-site pre/post/comb and normalized input from the real residual bank on-device, downloads only verification outputs, and reports norm/post/comb drift while the CPU path remains authoritative. CPU and CUDA-linked GLM builds plus the CUDA backend suite pass; runtime drift measurement waits for the next safe restart.
 - `2c660d2b` keeps the attention-site device residual resident across the site-loop boundary and feeds that exact `H×D` pointer directly into FFN-site device mHC-pre under verification mode. Per-layer mHC/norm weights are persistently resident, so the second site skips both the residual re-upload and repeated ~1.5 MiB `hc_fn` uploads. CPU and CUDA-linked GLM builds plus the CUDA backend suite pass.
 - `ba391c9a` makes the **device-normalized `D` row** the explicit host FFN boundary in verification mode. CPU mHC-pre/RMSNorm remains the oracle, but downstream FFN consumes the downloaded device-normalized row instead of depending on the full host residual bank. CPU and CUDA-linked GLM builds plus the CUDA backend suite pass.
+- `723e1b73` lets the S=1 CUDA router consume that already-resident normalized device row directly, skipping its hidden-row H2D upload. Router mode 2 still keeps CPU selection/weights authoritative and now reports `dev_in=1` when the transfer-free input is used. CPU/CUDA-linked builds and CUDA backend correctness pass.
 
 Work:
-- move the decode router onto the existing device-normalized row so routing no longer needs a host-row upload;
 - move resident MoE consumption onto that device row so the normalized activation no longer returns to CPU;
 - preserve residual stream across layer boundaries;
 - replace broad synchronizations with dependency-local synchronization.
