@@ -2594,12 +2594,23 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
     float *score = malloc((size_t)c->n_experts * sizeof(float));
     if (!chosen || !weight || !score) { fprintf(stderr, "OOM in router\n"); exit(1); }
 
-    /* --- primo tempo: il router, per ogni token --- */
+    /* --- primo tempo: il router, per ogni token ---
+     * COLI_CUDA_GLM53_ROUTER=1 uses the GPU result for S=1 decode.
+     * Mode 2 is a qualification arm: run the same GPU router, but keep the
+     * scalar CPU result authoritative and report any selection/weight drift. */
     const double router_t0 = profile_enabled() ? now_s() : 0.0;
     int cuda_routed = 0;
 #ifdef COLI_CUDA
-    if (tokens == 1)
-        cuda_routed = cuda_router_try(m, (GLayer *)l, x, chosen, weight, topk);
+    const int router_mode = cuda_router_mode();
+    int cuda_candidate = 0;
+    int gpu_chosen[64];
+    float gpu_weight[64];
+    if (tokens == 1 && router_mode > 0) {
+        int *dst_i = router_mode == 1 ? chosen : gpu_chosen;
+        float *dst_w = router_mode == 1 ? weight : gpu_weight;
+        cuda_candidate = cuda_router_try(m, (GLayer *)l, x, dst_i, dst_w, topk);
+        cuda_routed = router_mode == 1 && cuda_candidate;
+    }
 #endif
     for (int t = cuda_routed ? tokens : 0; t < tokens; t++) {
         const float *row = x + (size_t)t * c->hidden;
@@ -2634,6 +2645,28 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
          * this layer. The shared helper also bumps .coli_usage counters. */
         rt_route(index, t, mine, mine_w, topk);
     }
+#ifdef COLI_CUDA
+    if (tokens == 1 && router_mode == 2 && cuda_candidate) {
+        int idx_mismatch = 0;
+        float max_abs = 0.0f;
+        for (int k = 0; k < topk; k++) {
+            if (gpu_chosen[k] != chosen[k]) idx_mismatch = 1;
+            const float delta = fabsf(gpu_weight[k] - weight[k]);
+            if (delta > max_abs) max_abs = delta;
+        }
+        static uint64_t verify_ok = 0, verify_mismatch = 0;
+        if (idx_mismatch) verify_mismatch++; else verify_ok++;
+        static int verify_reports = 0;
+        if (idx_mismatch || verify_reports < 8) {
+            fprintf(stderr,
+                    "[CUDA] GLM53 router verify layer=%d idx_match=%d max_weight_abs=%.7g ok=%llu mismatch=%llu\n",
+                    index, !idx_mismatch, max_abs,
+                    (unsigned long long)verify_ok,
+                    (unsigned long long)verify_mismatch);
+            verify_reports++;
+        }
+    }
+#endif
     if (cuda_routed) rt_route(index, 0, chosen, weight, topk);
     rt_trace_end();
     if (router_t0) m->t_router += now_s() - router_t0;
