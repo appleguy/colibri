@@ -2630,12 +2630,12 @@ static int cuda_shared_moe_verify_dev(GModel *m, GLayer *l,
     return 1;
 }
 
-static int cuda_resident_moe_verify_dev(GModel *m, int layer,
+static float *cuda_resident_moe_dev(GModel *m, int layer,
         const int *chosen, const float *weight, int topk,
-        const float *x_dev, float *out_host) {
-    if (!m || !chosen || !weight || !x_dev || !out_host || topk < 1 || topk > 64 ||
+        const float *x_dev) {
+    if (!m || !chosen || !weight || !x_dev || topk < 1 || topk > 64 ||
         !g_cuda_ready || !m->gpu_expert || m->gpu_expert_count < 1)
-        return 0;
+        return NULL;
 
     ColiCudaTensor *gate[64], *up[64], *down[64];
     float rw[64];
@@ -2651,7 +2651,7 @@ static int cuda_resident_moe_verify_dev(GModel *m, int layer,
         rw[count] = weight[k];
         count++;
     }
-    if (!count) return 0;
+    if (!count) return NULL;
 
     const size_t row_b = (size_t)m->c.hidden * sizeof(float);
     float *slot_dev = coli_cuda_pipe_scratch(g_cuda_device, 17, row_b);
@@ -2662,10 +2662,9 @@ static int cuda_resident_moe_verify_dev(GModel *m, int layer,
             gate, up, down, rw, count, g_cuda_device, x_dev, slot_dev,
             m->c.swiglu_limit) ||
         !coli_cuda_expert_group_resident_take(
-            g_cuda_device, devices, 1, slot_dev, acc_dev, m->c.hidden) ||
-        !coli_cuda_pipe_download(g_cuda_device, acc_dev, out_host, row_b))
-        return 0;
-    return 1;
+            g_cuda_device, devices, 1, slot_dev, acc_dev, m->c.hidden))
+        return NULL;
+    return acc_dev;
 }
 
 static int cuda_moe_block(GModel *m, const LCache *cache, const int *slot_of,
@@ -2964,9 +2963,12 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
         const int resident_ok = cuda_resident_moe(
             m, index, union_ids, n_union, chosen, weight, tokens, topk, x, out, handled);
         if (resident_ok) {
-            if (resident_before &&
-                cuda_resident_moe_verify_dev(m, index, chosen, weight, topk, x_dev,
-                                             resident_dev)) {
+            float *resident_out_dev = resident_before
+                ? cuda_resident_moe_dev(m, index, chosen, weight, topk, x_dev)
+                : NULL;
+            if (resident_out_dev &&
+                coli_cuda_pipe_download(g_cuda_device, resident_out_dev, resident_dev,
+                                        (size_t)c->hidden * sizeof(float))) {
                 float max_abs = 0.0f, max_rel = 0.0f;
                 for (int q = 0; q < c->hidden; q++) {
                     const float ref = out[q] - resident_before[q];
