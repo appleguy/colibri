@@ -159,7 +159,7 @@ Exit:
 ### U40 — GPU sparse indexer + persistent attention state
 **Class:** P
 **Depends on:** U20 device-resident activation conventions
-**Status:** ACTIVE / DECODE QUALIFICATION WIRED, NOT AUTHORITATIVE
+**Status:** ACTIVE / AUTHORITATIVE DECODE WIRED, NATIVE QUALIFICATION PENDING
 **Priority:** P1
 
 Goal: remove the remaining CPU-side sparse-index construction and attention-state traffic.
@@ -175,6 +175,7 @@ Completed checkpoints:
 - `792108b9` keeps each layer's immutable k-pool compression APE resident beside the pooled-index cache instead of uploading it whenever a new pool completes. RTX CUDA parity plus CPU/CUDA-linked GLM builds pass; this removes another per-pool H2D command at negligible VRAM cost.
 - `26bf8671` completes `COLI_CUDA_GLM53_INDEXER=1` authoritative decode plumbing. Mode 1 runs the CUDA indexer first and skips CPU sparse selection on success, but falls back immediately to the unchanged CPU selector on any backend failure; mode 2 remains CPU-authoritative exact-parity qualification. CPU and CUDA-linked GLM builds pass. Do not enable mode 1 until a real-model mode-2 run is clean.
 - `548b5269` splits cumulative indexer profiling into `index_proj` and `index_select` while preserving the aggregate `indexer` bucket. The next real-model run can therefore distinguish CPU projection/LayerNorm cost from sparse-selection cost before choosing the next GPU migration target. CPU and CUDA-linked GLM builds pass.
+- `6cf9aa76` removes another O(context) host decode sweep: each full-attention layer now owns a session-lifetime all-valid mask instead of malloc+memset of `seen` bytes on every MLA call. Selector semantics, CPU fallback, and the CUDA validity-cache contract are unchanged. RTX 4090 backend numerical parity, CPU GLM build, CUDA-linked GLM build, and `git diff --check` pass.
 
 Work:
 - persistent latent/KV/index state in VRAM where capacity permits;
