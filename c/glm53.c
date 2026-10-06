@@ -2580,6 +2580,44 @@ static int cuda_resident_moe(GModel *m, int layer,
     return ok;
 }
 
+static int cuda_resident_moe_verify_dev(GModel *m, int layer,
+        const int *chosen, const float *weight, int topk,
+        const float *x_dev, float *out_host) {
+    if (!m || !chosen || !weight || !x_dev || !out_host || topk < 1 || topk > 64 ||
+        !g_cuda_ready || !m->gpu_expert || m->gpu_expert_count < 1)
+        return 0;
+
+    ColiCudaTensor *gate[64], *up[64], *down[64];
+    float rw[64];
+    int count = 0;
+    for (int k = 0; k < topk; k++) {
+        const int eid = chosen[k];
+        if (eid < 0 || eid >= m->c.n_experts) continue;
+        GpuExpert *ge = &m->gpu_expert[(size_t)layer * m->c.n_experts + eid];
+        if (!ge->resident) continue;
+        gate[count] = ge->g;
+        up[count] = ge->u;
+        down[count] = ge->d;
+        rw[count] = weight[k];
+        count++;
+    }
+    if (!count) return 0;
+
+    const size_t row_b = (size_t)m->c.hidden * sizeof(float);
+    float *slot_dev = coli_cuda_pipe_scratch(g_cuda_device, 17, row_b);
+    float *acc_dev = coli_cuda_pipe_scratch(g_cuda_device, 18, row_b);
+    int devices[1] = { g_cuda_device };
+    if (!slot_dev || !acc_dev ||
+        !coli_cuda_expert_group_resident_issue_clamped(
+            gate, up, down, rw, count, g_cuda_device, x_dev, slot_dev,
+            m->c.swiglu_limit) ||
+        !coli_cuda_expert_group_resident_take(
+            g_cuda_device, devices, 1, slot_dev, acc_dev, m->c.hidden) ||
+        !coli_cuda_pipe_download(g_cuda_device, acc_dev, out_host, row_b))
+        return 0;
+    return 1;
+}
+
 static int cuda_moe_block(GModel *m, const LCache *cache, const int *slot_of,
                           const int *union_ids, int base, int here,
                           const int *chosen, const float *weight, int tokens,
@@ -2834,16 +2872,49 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
      * those ids from the ordinary RAM/disk union, so backend failure preserves
      * the exact old path. */
     if (g_cuda_ready && m->gpu_expert_count > 0 && n_union > 0) {
+        float *resident_before = NULL, *resident_dev = NULL;
+        if (tokens == 1 && x_dev && cuda_chain_mode() == 2) {
+            resident_before = malloc((size_t)c->hidden * sizeof(float));
+            resident_dev = malloc((size_t)c->hidden * sizeof(float));
+            if (!resident_before || !resident_dev) {
+                fprintf(stderr, "OOM allocating resident MoE verification rows\n");
+                exit(1);
+            }
+            memcpy(resident_before, out, (size_t)c->hidden * sizeof(float));
+        }
         unsigned char *handled = calloc((size_t)n_union, 1);
         if (!handled) { fprintf(stderr, "OOM allocating resident expert mask\n"); exit(1); }
-        if (cuda_resident_moe(m, index, union_ids, n_union, chosen, weight,
-                              tokens, topk, x, out, handled)) {
+        const int resident_ok = cuda_resident_moe(
+            m, index, union_ids, n_union, chosen, weight, tokens, topk, x, out, handled);
+        if (resident_ok) {
+            if (resident_before &&
+                cuda_resident_moe_verify_dev(m, index, chosen, weight, topk, x_dev,
+                                             resident_dev)) {
+                float max_abs = 0.0f, max_rel = 0.0f;
+                for (int q = 0; q < c->hidden; q++) {
+                    const float ref = out[q] - resident_before[q];
+                    const float da = fabsf(resident_dev[q] - ref);
+                    const float dr = da / (fabsf(ref) + 1e-6f);
+                    if (da > max_abs) max_abs = da;
+                    if (dr > max_rel) max_rel = dr;
+                }
+                static int resident_verify_reports = 0;
+                if (resident_verify_reports < 16) {
+                    fprintf(stderr,
+                            "[CUDA] GLM53 resident MoE dev-row verify layer=%d "
+                            "max_abs=%.6g max_rel=%.6g\n",
+                            index, max_abs, max_rel);
+                    resident_verify_reports++;
+                }
+            }
             int keep = 0;
             for (int i = 0; i < n_union; i++)
                 if (!handled[i]) union_ids[keep++] = union_ids[i];
             n_union = keep;
         }
         free(handled);
+        free(resident_dev);
+        free(resident_before);
     }
 #endif
 
