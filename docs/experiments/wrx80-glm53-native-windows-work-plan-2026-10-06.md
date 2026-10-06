@@ -417,3 +417,12 @@ Do not start N70/N80 yet.
 ## Wake prompt
 
 Resume the WRX80 native-Windows GLM-5.3 plan from `docs/experiments/wrx80-glm53-native-windows-work-plan-2026-10-06.md` and the execution ledger. If inference is stalled or idle, verify that first, preserve any useful run output, then advance the highest-priority independent unit (N10, N20, N30, or N40) with a tiny validated commit and update the plan/ledger before moving on.
+
+
+## Progress checkpoint — 2026-10-06 12:36 local
+
+- N20.1 B1 PASSED: CHAIN=0 / ROUTER=2 / INDEXER=2, 8 decode tokens, 0.975 tok/s, clean reported indexer/router parity.
+- N20.2 B2 PASSED: CHAIN=0 / ROUTER=1 / INDEXER=2, 8 decode tokens, 0.982 tok/s, 8/8 reported exact indexer checks, zero mismatch/failure.
+- The first marshaled N20.3 attempt was invalid because the PowerShell runner split the multiword prompt into separate argv words. It exited before model loading. `c70ae1f` fixes and smoke-tests prompt quoting.
+- N20.3 B3 is now the active serialized gate: CHAIN=0 / ROUTER=1 / INDEXER=1, same 551-token prompt and 8-token tail. Require authoritative indexer success and zero fallback.
+- N30 and N40 remain independent work if B3 is running or blocked.

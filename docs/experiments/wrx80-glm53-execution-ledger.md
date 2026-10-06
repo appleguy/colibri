@@ -458,3 +458,22 @@ If inference itself is stalled or idle:
 > advance the highest-priority independent GPU/CPU/source unit without restarting or
 > discarding useful work. Prefer measurable latency reductions, frequent tiny commits,
 > and update the ledger before moving to the next unit.
+
+
+### Native Windows B1/B2 decode ladder — 2026-10-06
+
+B1 (CHAIN=0, ROUTER=2, INDEXER=2) completed on the fixed 551-token prompt with 8 greedy decode tokens:
+- sparse indexer reported 8/8 exact parity checks with zero mismatch/failure;
+- router qualification reported exact selected-index parity in the visible checks;
+- decode: **8 tokens in 8.2 s = 0.975 tok/s**;
+- peak CUDA used 21,759.5 MiB, minimum free 2,804 MiB.
+
+B2 (CHAIN=0, ROUTER=1, INDEXER=2) also completed cleanly:
+- sparse indexer reported 8/8 exact parity checks with zero mismatch/failure;
+- decode: **8 tokens in 8.1 s = 0.982 tok/s**;
+- peak CUDA used 22,623.5 MiB, minimum free 1,940 MiB.
+This is a small but directionally positive result for authoritative GPU routing.
+
+The first marshaled B3 attempt did **not** reach model code: PowerShell Start-Process -ArgumentList flattened the prompt and glm53.exe rejected the bare word `this`. `c70ae1f` fixes prompt quoting; an argv smoke test confirmed a multiword prompt remains one argument. No B3 performance/correctness conclusion should be drawn from the failed 29 ms harness attempt.
+
+Next serialized gate: B3 with CHAIN=0, ROUTER=1, INDEXER=1, same prompt and 8-token tail. Require authoritative indexer success with zero fallback before advancing.
