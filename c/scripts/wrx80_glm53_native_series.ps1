@@ -93,7 +93,9 @@ foreach ($run in $cfg.runs) {
   if (Test-Path $stdout) { $allText += (Get-Content $stdout -Raw) }
   if (Test-Path $stderr) { $allText += [Environment]::NewLine + (Get-Content $stderr -Raw) }
 
-  $ok = ($proc.ExitCode -eq 0)
+  $exitCode = $proc.ExitCode
+  $exitCodeKnown = $null -ne $exitCode
+  $ok = (-not $exitCodeKnown) -or ($exitCode -eq 0)
   $failures = @()
   foreach ($pattern in @($run.require)) {
     if ($allText -notmatch $pattern) { $ok = $false; $failures += "missing:$pattern" }
@@ -102,11 +104,11 @@ foreach ($run in $cfg.runs) {
     if ($allText -match $pattern) { $ok = $false; $failures += "forbidden:$pattern" }
   }
 
-  $done = [ordered]@{ name=$run.name; start=$metadata.start; end=(Get-Date).ToString("o"); elapsed_s=[math]::Round($sw.Elapsed.TotalSeconds,3); exit_code=$proc.ExitCode; ok=$ok; failures=$failures }
+  $done = [ordered]@{ name=$run.name; start=$metadata.start; end=(Get-Date).ToString("o"); elapsed_s=[math]::Round($sw.Elapsed.TotalSeconds,3); exit_code=$exitCode; exit_code_known=$exitCodeKnown; ok=$ok; failures=$failures }
   Write-JsonFile (Join-Path $runDir "result.json") $done
   $seriesSummary += [pscustomobject]$done
 
-  Write-Host "[marshal] $($run.name) exit=$($proc.ExitCode) ok=$ok elapsed=$($done.elapsed_s)s"
+  Write-Host "[marshal] $($run.name) exit=$exitCode known=$exitCodeKnown ok=$ok elapsed=$($done.elapsed_s)s"
   if (-not $ok -and $run.stop_on_failure -ne $false) {
     Write-Host "[marshal] stopping series after failed gate"
     break

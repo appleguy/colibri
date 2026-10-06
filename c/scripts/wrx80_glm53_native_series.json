@@ -38,7 +38,8 @@
       ],
       "require": [
         "decode 8 token",
-        "indexer authoritative q=.*ok=1"
+        "indexer authoritative q=.*ok=1",
+        "\\[STATS\\]"
       ],
       "forbid": [
         "fallback=[1-9]",
@@ -58,7 +59,8 @@
       },
       "require": [
         "decode 8 token",
-        "indexer authoritative q=.*ok=1"
+        "indexer authoritative q=.*ok=1",
+        "\\[STATS\\]"
       ],
       "forbid": [
         "fallback=[1-9]",
