@@ -89,6 +89,13 @@ static size_t tensor_scale_bytes(const ColiCudaTensor *t) {
 struct AnsArenaChunk { uint8_t *p; size_t used,cap; };
 #endif
 typedef struct {
+    const float *ape_host;              /* stable per-layer cache identity */
+    float *pooled_dev;                  /* completed compressed index pools */
+    size_t pooled_cap;
+    int pooled_rows;
+} SparseIndexCache;
+
+typedef struct {
     int device;
     int compute_major,compute_minor;
     float *x, *y, *gate, *up;
@@ -115,6 +122,7 @@ typedef struct {
     cudaStream_t stream;
     cudaEvent_t ev_done; int ev_done_ok;        /* resident-group issue completion (#431 PR-C0) */
     cudaEvent_t sparse_upload_done; int sparse_upload_event_ok, sparse_upload_pending;
+    std::vector<SparseIndexCache> *sparse_index_cache;
     void *group_desc; size_t group_desc_cap;
     void *glm_group_weights; size_t glm_group_weights_cap;
     void *glm_group_scales; size_t glm_group_scales_cap;
@@ -1404,6 +1412,10 @@ extern "C" void coli_cuda_shutdown(void) {
         if (ctx->host_y) cudaFreeHost(ctx->host_y);
         if (ctx->host_kv) cudaFreeHost(ctx->host_kv);
         if (ctx->host_sparse) cudaFreeHost(ctx->host_sparse);
+        if (ctx->sparse_index_cache) {
+            for (auto &cache : *ctx->sparse_index_cache) if (cache.pooled_dev) cudaFree(cache.pooled_dev);
+            delete ctx->sparse_index_cache;
+        }
         if (ctx->sparse_upload_event_ok) cudaEventDestroy(ctx->sparse_upload_done);
         if (ctx->stream) cudaStreamDestroy(ctx->stream);
         if (ctx->group_desc) cudaFree(ctx->group_desc);
@@ -1426,7 +1438,7 @@ extern "C" void coli_cuda_shutdown(void) {
         ctx->dx = ctx->dy = nullptr; ctx->dx_cap = ctx->dy_cap = 0;
         ctx->qx=nullptr; ctx->qscale=nullptr;
         ctx->aq=ctx->al=ctx->ar=ctx->ac=nullptr;ctx->asel=nullptr;
-        ctx->host_x=ctx->host_y=ctx->host_kv=ctx->host_sparse=nullptr;ctx->stream=nullptr;
+        ctx->host_x=ctx->host_y=ctx->host_kv=ctx->host_sparse=nullptr;ctx->sparse_index_cache=nullptr;ctx->stream=nullptr;
         ctx->x_cap = ctx->y_cap = ctx->gate_cap = ctx->up_cap = 0;
         ctx->qx_cap=ctx->qscale_cap=0;
         ctx->aq_cap=ctx->al_cap=ctx->ar_cap=ctx->ac_cap=0;ctx->asel_cap=0;
