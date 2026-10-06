@@ -746,6 +746,7 @@ typedef struct {
     int gpu_expert_count;
     uint64_t gpu_expert_calls, gpu_expert_rows, gpu_expert_hits, gpu_expert_fallback;
     uint64_t gpu_expert_avoided_h2d_bytes;
+    uint64_t gpu_decode_resident_sets, gpu_decode_all_resident_sets;
     double gpu_expert_seconds;
     size_t gpu_vram_peak_used, gpu_vram_min_free, gpu_vram_total;
     int *gpu_resident_pos, *gpu_resident_row_ids;
@@ -2944,6 +2945,8 @@ static float *ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
     }
 
 #ifdef COLI_CUDA
+    const int track_resident_set = tokens == 1 && x_dev && cuda_chain_mode() == 2;
+    if (track_resident_set) m->gpu_decode_resident_sets++;
     float *complete_dev = NULL;
     /* Persistent VRAM residents are computed first into an atomic scratch
      * accumulator. Only after the whole resident subset succeeds do we remove
@@ -3013,8 +3016,10 @@ static float *ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
             for (int i = 0; i < n_union; i++)
                 if (!handled[i]) union_ids[keep++] = union_ids[i];
             n_union = keep;
-            if (n_union == 0 && shared_out_dev && resident_out_dev)
+            if (n_union == 0 && shared_out_dev && resident_out_dev) {
                 complete_dev = shared_out_dev;
+                if (track_resident_set) m->gpu_decode_all_resident_sets++;
+            }
         }
         free(handled);
         free(resident_dev);
@@ -4046,6 +4051,14 @@ static float *forward_span(GModel *m, GSession *s, const int *tokens, int n,
                     m->gpu_vram_peak_used / 1048576.0,
                     m->gpu_vram_min_free / 1048576.0,
                     m->gpu_vram_total / 1048576.0);
+        if (every > 0 && (m->forwards % (uint64_t)every) == 0 &&
+            m->gpu_decode_resident_sets)
+            fprintf(stderr,
+                    "[PROF] GLM53 resident_coverage all=%llu sets=%llu pct=%.1f\n",
+                    (unsigned long long)m->gpu_decode_all_resident_sets,
+                    (unsigned long long)m->gpu_decode_resident_sets,
+                    100.0 * (double)m->gpu_decode_all_resident_sets /
+                    (double)m->gpu_decode_resident_sets);
 #endif
     }
 
