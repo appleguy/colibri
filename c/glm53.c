@@ -2031,6 +2031,126 @@ static void cuda_resident_expert_init(GModel *m) {
  * prompt never needs a tokens*topk activation allocation. `cpu_from` is the
  * first token not fully handled by CUDA, allowing a later CUDA refusal to fall
  * back on CPU without repeating already scattered token rows. */
+
+/* Serve the hot routed-expert subset directly from persistent VRAM.
+ *
+ * Normal GLM53 prefill is already chunked to GLM53_MOE_BATCH_ROWS (128), and
+ * decode is one row. Keep an invocation-sized accumulator so the operation is
+ * atomic with respect to the CPU fallback: if any resident-group call fails,
+ * no partial GPU contribution has touched the output.
+ *
+ * handled[i] is set only after every resident group succeeds, allowing the
+ * caller to remove those experts from the RAM/disk union before its unchanged
+ * cache path runs.
+ */
+static int cuda_resident_moe(GModel *m, int layer,
+                             const int *union_ids, int n_union,
+                             const int *chosen, const float *weight,
+                             int tokens, int topk, const float *x, float *out,
+                             unsigned char *handled) {
+    if (!m->gpu_expert || m->gpu_expert_count < 1 || tokens < 1 ||
+        tokens > GLM53_MOE_BATCH_ROWS || n_union < 1) return 0;
+
+    int *resident_pos = malloc((size_t)n_union * sizeof(*resident_pos));
+    const int max_rows = tokens * topk;
+    int *row_ids = malloc((size_t)max_rows * sizeof(*row_ids));
+    float *row_weights = malloc((size_t)max_rows * sizeof(*row_weights));
+    float *xg = malloc((size_t)max_rows * m->c.hidden * sizeof(*xg));
+    float *tmp = malloc((size_t)max_rows * m->c.hidden * sizeof(*tmp));
+    float *acc = calloc((size_t)tokens * m->c.hidden, sizeof(*acc));
+    if (!resident_pos || !row_ids || !row_weights || !xg || !tmp || !acc) {
+        fprintf(stderr, "OOM allocating resident CUDA MoE scratch\n");
+        exit(1);
+    }
+
+    int nres = 0;
+    for (int i = 0; i < n_union; i++) {
+        const int eid = union_ids[i];
+        GpuExpert *ge = &m->gpu_expert[(size_t)layer * m->c.n_experts + eid];
+        if (ge->resident) resident_pos[nres++] = i;
+    }
+    if (!nres) {
+        free(acc); free(tmp); free(xg); free(row_weights); free(row_ids); free(resident_pos);
+        return 0;
+    }
+
+    int ok = 1;
+    uint64_t served_rows = 0, calls = 0;
+    for (int base = 0; base < nres && ok; base += 64) {
+        const int here = base + 64 <= nres ? 64 : nres - base;
+        ColiCudaTensor *gate[64], *up[64], *down[64];
+        int rows[64];
+        int groups = 0, R = 0;
+
+        for (int q = 0; q < here; q++) {
+            const int ui = resident_pos[base + q];
+            const int eid = union_ids[ui];
+            GpuExpert *ge = &m->gpu_expert[(size_t)layer * m->c.n_experts + eid];
+            const int begin = R;
+            for (int t = 0; t < tokens; t++) {
+                for (int k = 0; k < topk; k++) {
+                    if (chosen[(size_t)t * topk + k] != eid) continue;
+                    memcpy(xg + (size_t)R * m->c.hidden,
+                           x + (size_t)t * m->c.hidden,
+                           (size_t)m->c.hidden * sizeof(float));
+                    row_ids[R] = t;
+                    row_weights[R] = weight[(size_t)t * topk + k];
+                    R++;
+                    break;
+                }
+            }
+            if (R == begin) continue;
+            gate[groups] = ge->g;
+            up[groups] = ge->u;
+            down[groups] = ge->d;
+            rows[groups] = R - begin;
+            groups++;
+        }
+
+        if (groups && !coli_cuda_expert_group_clamped(
+                gate, up, down, rows, groups, tmp, xg, m->c.swiglu_limit)) {
+            ok = 0;
+            break;
+        }
+        if (groups) {
+            int off = 0;
+            for (int g = 0; g < groups; g++) {
+                for (int r = 0; r < rows[g]; r++) {
+                    const int pos = off + r;
+                    float *dst = acc + (size_t)row_ids[pos] * m->c.hidden;
+                    const float *src = tmp + (size_t)pos * m->c.hidden;
+                    const float scale = row_weights[pos];
+                    for (int d = 0; d < m->c.hidden; d++) dst[d] += scale * src[d];
+                }
+                off += rows[g];
+            }
+            served_rows += (uint64_t)R;
+            calls++;
+        }
+    }
+
+    if (ok) {
+        for (size_t z = 0, n = (size_t)tokens * m->c.hidden; z < n; z++) out[z] += acc[z];
+        for (int q = 0; q < nres; q++) handled[resident_pos[q]] = 1;
+        m->gpu_expert_calls += calls;
+        m->gpu_expert_rows += served_rows;
+        m->gpu_expert_hits += (uint64_t)nres;
+        static int announced;
+        if (!announced) {
+            announced = 1;
+            fprintf(stderr,
+                    "[CUDA] GLM53 persistent expert tier active: %d hot experts in this layer, "
+                    "%llu routed rows served without weight H2D\n",
+                    nres, (unsigned long long)served_rows);
+        }
+    } else {
+        m->gpu_expert_fallback++;
+    }
+
+    free(acc); free(tmp); free(xg); free(row_weights); free(row_ids); free(resident_pos);
+    return ok;
+}
+
 static int cuda_moe_block(GModel *m, const LCache *cache, const int *slot_of,
                           const int *union_ids, int base, int here,
                           const int *chosen, const float *weight, int tokens,
@@ -2234,6 +2354,25 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
         for (int j = 0; j < n_union; j++) if (union_ids[j] == chosen[i]) { seen = 1; break; }
         if (!seen) union_ids[n_union++] = chosen[i];
     }
+
+#ifdef COLI_CUDA
+    /* Persistent VRAM residents are computed first into an atomic scratch
+     * accumulator. Only after the whole resident subset succeeds do we remove
+     * those ids from the ordinary RAM/disk union, so backend failure preserves
+     * the exact old path. */
+    if (g_cuda_ready && m->gpu_expert_count > 0 && n_union > 0) {
+        unsigned char *handled = calloc((size_t)n_union, 1);
+        if (!handled) { fprintf(stderr, "OOM allocating resident expert mask\n"); exit(1); }
+        if (cuda_resident_moe(m, index, union_ids, n_union, chosen, weight,
+                              tokens, topk, x, out, handled)) {
+            int keep = 0;
+            for (int i = 0; i < n_union; i++)
+                if (!handled[i]) union_ids[keep++] = union_ids[i];
+            n_union = keep;
+        }
+        free(handled);
+    }
+#endif
 
     LCache *cache = &m->ecache[index];
     const int block = cache->cap;
