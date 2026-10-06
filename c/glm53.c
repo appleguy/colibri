@@ -636,6 +636,8 @@ static int g_cuda_ready = 0;
 static int g_cuda_device = 0;
 static size_t g_cuda_expert_limit = (size_t)8 << 30;
 static int g_cuda_expert_min_rows = 32;
+static double g_cuda_resident_expert_gb = 0.0;
+static double g_cuda_resident_reserve_gb = 3.0;
 static uint64_t g_cuda_moe_calls = 0;
 static uint64_t g_cuda_moe_rows = 0;
 static uint64_t g_cuda_moe_fallback = 0;
@@ -700,6 +702,10 @@ typedef struct {
     float *ikeys, *igates;                /* [cap][dim indexer] */
 } GLayerState;
 
+#ifdef COLI_CUDA
+typedef struct GpuExpert GpuExpert;
+#endif
+
 typedef struct {
     GLayerState *layer;
     float *kda_scratch;
@@ -726,6 +732,12 @@ typedef struct {
     int64_t e_len[6], e_at[6], e_slot;
     uint64_t clock, ebytes;
     long hits, miss;
+#ifdef COLI_CUDA
+    GpuExpert *gpu_expert;
+    size_t gpu_expert_logical, gpu_expert_vram;
+    int gpu_expert_count;
+    uint64_t gpu_expert_calls, gpu_expert_rows, gpu_expert_hits, gpu_expert_fallback;
+#endif
     /* Telemetria per la dashboard (#1376 follow-up: Brain e Profile erano
      * vuoti su Flash perche' il motore non emetteva nulla). Tempi di fase
      * cumulativi dall'avvio; il turno ne prende la differenza. */
@@ -1305,6 +1317,14 @@ typedef struct {
     int metal_registered;
     uint64_t used;
 } Slot;
+#ifdef COLI_CUDA
+struct GpuExpert {
+    ColiCudaTensor *g, *u, *d;
+    size_t logical_bytes, vram_bytes;
+    uint32_t heat;
+    unsigned char resident;
+};
+#endif
 typedef struct LCache { Slot *s; int n, cap; } LCache;
 
 #ifdef COLI_CUDA
@@ -1328,6 +1348,26 @@ static void cuda_expert_budget_init(void) {
             fprintf(stderr, "[CUDA] ignoring invalid COLI_CUDA_EXPERT_MIN_ROWS=%s\n", setting);
         } else {
             g_cuda_expert_min_rows = (int)rows;
+        }
+    }
+    setting = getenv("COLI_CUDA_RESIDENT_EXPERT_GB");
+    if (setting && *setting) {
+        char *end = NULL;
+        double gb = strtod(setting, &end);
+        if (end == setting || *end || !isfinite(gb) || gb < 0.0 || gb > 20.0) {
+            fprintf(stderr, "[CUDA] ignoring invalid COLI_CUDA_RESIDENT_EXPERT_GB=%s\n", setting);
+        } else {
+            g_cuda_resident_expert_gb = gb;
+        }
+    }
+    setting = getenv("COLI_CUDA_RESIDENT_RESERVE_GB");
+    if (setting && *setting) {
+        char *end = NULL;
+        double gb = strtod(setting, &end);
+        if (end == setting || *end || !isfinite(gb) || gb < 1.0 || gb > 12.0) {
+            fprintf(stderr, "[CUDA] ignoring invalid COLI_CUDA_RESIDENT_RESERVE_GB=%s\n", setting);
+        } else {
+            g_cuda_resident_reserve_gb = gb;
         }
     }
 }
@@ -1866,6 +1906,125 @@ static void expert_mats(const GModel *m, const Slot *slot, Mat *gate, Mat *up, M
     };
     *gate = shape[0]; *up = shape[1]; *down = shape[2];
 }
+
+#ifdef COLI_CUDA
+typedef struct {
+    int layer, eid;
+    uint32_t heat;
+} GpuExpertCandidate;
+
+static int gpu_expert_candidate_cmp(const void *ap, const void *bp) {
+    const GpuExpertCandidate *a = (const GpuExpertCandidate *)ap;
+    const GpuExpertCandidate *b = (const GpuExpertCandidate *)bp;
+    if (a->heat != b->heat) return a->heat < b->heat ? 1 : -1;
+    if (a->layer != b->layer) return a->layer - b->layer;
+    return a->eid - b->eid;
+}
+
+static void gpu_expert_free(GpuExpert *e) {
+    if (!e) return;
+    if (e->g) coli_cuda_tensor_free(e->g);
+    if (e->u) coli_cuda_tensor_free(e->u);
+    if (e->d) coli_cuda_tensor_free(e->d);
+    memset(e, 0, sizeof(*e));
+}
+
+static void cuda_resident_expert_init(GModel *m) {
+    if (!g_cuda_ready || !m->streaming || !(g_cuda_resident_expert_gb > 0.0)) return;
+    const int from = m->c.first_dense > m->layer_begin ? m->c.first_dense : m->layer_begin;
+    const int layers = m->layer_end - from;
+    if (layers <= 0) return;
+
+    size_t free_b = 0, total_b = 0;
+    if (!coli_cuda_mem_info(g_cuda_device, &free_b, &total_b)) return;
+    const size_t reserve_b = (size_t)(g_cuda_resident_reserve_gb * 1e9);
+    if (free_b <= reserve_b) {
+        fprintf(stderr, "[CUDA] resident expert tier skipped: %.2f GiB free, reserve %.2f GiB\n",
+                free_b / (double)(1ull << 30), reserve_b / (double)(1ull << 30));
+        return;
+    }
+    size_t budget_b = (size_t)(g_cuda_resident_expert_gb * 1e9);
+    const size_t safe_b = free_b - reserve_b;
+    if (budget_b > safe_b) budget_b = safe_b;
+    if (!budget_b) return;
+
+    const size_t max_candidates = (size_t)layers * (size_t)m->c.n_experts;
+    GpuExpertCandidate *cand = malloc(max_candidates * sizeof(*cand));
+    if (!cand) { fprintf(stderr, "OOM allocating CUDA expert ranking\n"); exit(1); }
+    size_t nc = 0;
+    for (int layer = from; layer < m->layer_end; layer++) {
+        uint32_t *counts = rt_counts(layer);
+        if (!counts) continue;
+        for (int eid = 0; eid < m->c.n_experts; eid++) {
+            if (!counts[eid]) continue;
+            cand[nc++] = (GpuExpertCandidate){ layer, eid, counts[eid] };
+        }
+    }
+    if (!nc) {
+        fprintf(stderr, "[CUDA] resident expert tier: no routing history; leaving tier empty\n");
+        free(cand);
+        return;
+    }
+    qsort(cand, nc, sizeof(*cand), gpu_expert_candidate_cmp);
+
+    const size_t registry_n = (size_t)m->c.n_layers * (size_t)m->c.n_experts;
+    m->gpu_expert = calloc(registry_n, sizeof(*m->gpu_expert));
+    if (!m->gpu_expert) { fprintf(stderr, "OOM allocating CUDA expert registry\n"); exit(1); }
+
+    for (size_t ci = 0; ci < nc; ci++) {
+        if (m->gpu_expert_vram >= budget_b) break;
+        const int layer = cand[ci].layer, eid = cand[ci].eid;
+        GpuExpert *ge = &m->gpu_expert[(size_t)layer * m->c.n_experts + eid];
+
+        Slot slot;
+        memset(&slot, 0, sizeof(slot));
+        slot.eid = -1;
+        expert_read(m, layer, eid, &slot);
+        Mat gate, up, down;
+        expert_mats(m, &slot, &gate, &up, &down);
+
+        int ok = coli_cuda_tensor_upload_g(&ge->g, gate.q4, gate.s, 4,
+                                            gate.columns, gate.rows, g_cuda_device, gate.gs)
+              && coli_cuda_tensor_upload_g(&ge->u, up.q4, up.s, 4,
+                                            up.columns, up.rows, g_cuda_device, up.gs)
+              && coli_cuda_tensor_upload_g(&ge->d, down.q4, down.s, 4,
+                                            down.columns, down.rows, g_cuda_device, down.gs);
+        free(slot.own);
+        if (!ok) {
+            gpu_expert_free(ge);
+            break;
+        }
+
+        ge->logical_bytes = coli_cuda_tensor_bytes(ge->g)
+                          + coli_cuda_tensor_bytes(ge->u)
+                          + coli_cuda_tensor_bytes(ge->d);
+        ge->vram_bytes = coli_cuda_tensor_vram(ge->g)
+                       + coli_cuda_tensor_vram(ge->u)
+                       + coli_cuda_tensor_vram(ge->d);
+        if (m->gpu_expert_vram + ge->vram_bytes > budget_b) {
+            gpu_expert_free(ge);
+            break;
+        }
+        ge->heat = cand[ci].heat;
+        ge->resident = 1;
+        m->gpu_expert_count++;
+        m->gpu_expert_logical += ge->logical_bytes;
+        m->gpu_expert_vram += ge->vram_bytes;
+    }
+    free(cand);
+
+    size_t after_free = 0, after_total = 0;
+    coli_cuda_mem_info(g_cuda_device, &after_free, &after_total);
+    fprintf(stderr,
+            "[CUDA] GLM53 hot expert tier: %d experts, %.2f GiB logical / %.2f GiB VRAM; "
+            "%.2f GiB free (target %.1f GB, reserve %.1f GB)\n",
+            m->gpu_expert_count,
+            m->gpu_expert_logical / (double)(1ull << 30),
+            m->gpu_expert_vram / (double)(1ull << 30),
+            after_free / (double)(1ull << 30),
+            g_cuda_resident_expert_gb, g_cuda_resident_reserve_gb);
+}
+#endif
 
 #ifdef COLI_CUDA
 /* Run one cache-sized routed-expert block on CUDA.  Work is tiled so a long
@@ -2699,6 +2858,14 @@ static void model_release(GModel *m) {
         }
         free(m->layer);
     }
+#ifdef COLI_CUDA
+    if (m->gpu_expert) {
+        const size_t n = (size_t)m->c.n_layers * (size_t)m->c.n_experts;
+        for (size_t i = 0; i < n; i++) gpu_expert_free(&m->gpu_expert[i]);
+        free(m->gpu_expert);
+        m->gpu_expert = NULL;
+    }
+#endif
     if (m->ecache) {
         for (int i = 0; i < m->c.n_layers; i++) {
             LCache *cache = &m->ecache[i];
@@ -3832,6 +3999,9 @@ int main(int argc, char **argv) {
         memset(&served, 0, sizeof(served));
         model_load(&served, snap);
         glm53_telemetry_init(snap, &served.c);
+#ifdef COLI_CUDA
+        cuda_resident_expert_init(&served);
+#endif
         Tok serve_tok;
         char tokenizer_path[1024];
         snprintf(tokenizer_path, sizeof(tokenizer_path), "%s/tokenizer.json", snap);
@@ -3890,6 +4060,9 @@ int main(int argc, char **argv) {
     const double load_start = now_s();
     model_load(&model, dir);
     glm53_telemetry_init(dir, &model.c);
+#ifdef COLI_CUDA
+    cuda_resident_expert_init(&model);
+#endif
     const double load_seconds = now_s() - load_start;
     if (getenv("GLM53_VERBOSE")) cfg_report(&model.c);
 
