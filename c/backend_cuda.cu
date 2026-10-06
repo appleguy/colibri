@@ -3296,7 +3296,7 @@ extern "C" int coli_cuda_pipe_router(int device,const float *x_dev,
  * kernels on its own stream, the down-projection outputs are weighted and
  * reduced ON DEVICE (fixed expert order), and the device's partial sum is
  * peer-pushed into a per-issue slot on the home device. take() makes the home
- * legacy stream wait on every issue event and reduces the slots in issue order
+ * device stream wait on every issue event and reduces the slots in issue order
  * — deterministic, no atomics, no host bytes. The CPU tier overlaps with all
  * of it exactly as before. */
 __global__ static void bcast_row(float *dst,const float *src,int count,int D){
@@ -3415,9 +3415,9 @@ extern "C" int coli_cuda_expert_group_resident_take(int home_device,const int *d
     for(int i=0;i<n_issued;i++){
         DeviceContext *src=find_ctx(devices[i]);
         if(!src||!src->ev_done_ok) return 0;
-        if(!cuda_ok(cudaStreamWaitEvent(0,src->ev_done,0),"resident take wait")) return 0;
+        if(!cuda_ok(cudaStreamWaitEvent(home->stream,src->ev_done,0),"resident take wait")) return 0;
     }
-    sum_slots<<<48,256>>>(acc_dev,slots_dev,n_issued,D);          /* legacy stream: ordered with pipe_* */
+    sum_slots<<<48,256,0,home->stream>>>(acc_dev,slots_dev,n_issued,D);          /* ordered with pipe_* */
     return cuda_ok(cudaGetLastError(),"resident take reduce");
 }
 extern "C" int coli_cuda_pipe_copy2d(int device,float *dst,int dpitch,const float *src,
@@ -3464,13 +3464,13 @@ extern "C" int coli_cuda_pipe_swiglu_clamped(int device,float *gate_dev,
     if(fault_injected()||!gate_dev||!up_dev||!n||
        !(limit>0.f)||!std::isfinite(limit)) return 0;
     DeviceContext *ctx=find_ctx(device); if(!select_ctx(ctx)) return 0;
-    swiglu_clamped_pipe<<<(unsigned)((n+255)/256),256>>>(gate_dev,up_dev,n,limit);
+    swiglu_clamped_pipe<<<(unsigned)((n+255)/256),256,0,ctx->stream>>>(gate_dev,up_dev,n,limit);
     return cuda_ok(cudaGetLastError(),"pipe swiglu clamped");
 }
 extern "C" int coli_cuda_pipe_add(int device,float *x_dev,const float *t_dev,size_t n){
     if (fault_injected()) return 0;
     DeviceContext *ctx=find_ctx(device); if(!n||!select_ctx(ctx)) return 0;
-    pipe_add_n<<<(unsigned)((n+255)/256),256>>>(x_dev,t_dev,n);
+    pipe_add_n<<<(unsigned)((n+255)/256),256,0,ctx->stream>>>(x_dev,t_dev,n);
     return cuda_ok(cudaGetLastError(),"pipe add");
 }
 extern "C" int coli_cuda_pipe_hc_post(int device,float *out_dev,
@@ -3500,7 +3500,7 @@ extern "C" int coli_cuda_pipe_gemm(ColiCudaTensor *t,float *y_dev,const float *x
     if(!t||S<1) return 0;
     DeviceContext *ctx=find_ctx(t->device); if(!select_ctx(ctx)) return 0;
     dim3 grid((unsigned)t->O,(unsigned)S);
-    quant_matmul<<<grid,256>>>(y_dev,x_dev,t->weights,t->scales,t->fmt,S,t->I,t->O,
+    quant_matmul<<<grid,256,0,ctx->stream>>>(y_dev,x_dev,t->weights,t->scales,t->fmt,S,t->I,t->O,
         row_bytes(t->fmt,t->I),t->gs,t->ng);
     return cuda_ok(cudaGetLastError(),"pipe gemm");
 }
