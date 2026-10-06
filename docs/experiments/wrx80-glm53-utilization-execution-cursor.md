@@ -340,3 +340,13 @@ Resume WRX80 native-Windows GLM-5.3 optimization from `docs/experiments/wrx80-gl
 - Manual isolated-worktree CPU build using absolute w64devkit `make.exe` passed for the staged conservative CHAIN=1 source.
 - Evidence: `E:\\z-results\\glm53-native-2026-10-06\\chain1-validation\\cpu-build-manual.log` ends with `CPU_BUILD_PASS`.
 - ACTIVE next action: run CUDA DLL build in the isolated worktree with explicit CUDA/MSVC environment, then CUDA-linked GLM build, RTX backend numerical suite, and loader fixture. Do not commit `c/glm53.c` until all remaining gates pass.
+
+
+### U00.2 CUDA DLL validation — 2026-10-06
+
+- Isolated worktree: `E:\\z-src\\colibri-chain1-validate`.
+- Explicit native toolchain: w64devkit 2.10.0, CUDA 12.9, VS 2022 x64 `cl.exe`, `CUDA_ARCH=sm_89`.
+- `make cuda-dll CUDA_ARCH=sm_89` PASSED for the staged conservative CHAIN=1 source.
+- Evidence: `E:\\z-results\\glm53-native-2026-10-06\\chain1-validation\\cuda-dll-build-manual.log` ends with `CUDA_DLL_BUILD_PASS`.
+- Only existing nvcc warnings were observed; no new compiler/linker error.
+- ACTIVE next action: U00.3, build CUDA-linked native `glm53.exe`, then run the RTX backend numerical suite and loader fixture. Do not commit `c/glm53.c` until those gates pass.

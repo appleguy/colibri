@@ -584,3 +584,8 @@ The canonical next-work cursor is now `docs/experiments/wrx80-glm53-utilization-
 ### U00 validation progress — 2026-10-06 14:27 local
 
 The staged conservative CHAIN=1 source passed the isolated native CPU build. The earlier validator failure occurred in the wrapper/build environment after `make clean`, before any source compile failure was observed. Next gate is explicit native CUDA DLL + CUDA-linked GLM validation in the isolated worktree.
+
+
+### U00.2 checkpoint — CUDA DLL build PASS
+
+The staged CHAIN=1 step-1 source now passes both the isolated CPU build and isolated CUDA DLL build. Next gate is CUDA-linked `glm53.exe`, followed by RTX backend numerical tests and loader ABI fixture before source commit.
