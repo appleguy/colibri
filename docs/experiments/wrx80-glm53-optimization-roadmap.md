@@ -311,7 +311,8 @@ Validated on WRX80 while the production WSL GLM service remained live:
 - commit `b66b4721` completes the Windows `backend_loader.c` forwarding surface for the optimized GLM-5.3 CUDA ABI;
 - commit `55c818a0` makes the documented portable-w64devkit path honor a quoted explicit `NVCC_CCBIN` MSVC x64 compiler;
 - a tiny native loader smoke successfully `LoadLibrary`/resolves the committed DLL ABI, initializes GPU 0, queries VRAM, and shuts down;
-- a clean Windows checkout reset to committed `55c818a0` builds both `coli_cuda.dll CUDA_ARCH=sm_89` and `glm53.exe CUDA_DLL=1 ARCH=native` end to end in about 14 seconds.
+- a clean Windows checkout reset to committed `55c818a0` builds both `coli_cuda.dll CUDA_ARCH=sm_89` and `glm53.exe CUDA_DLL=1 ARCH=native` end to end in about 14 seconds;
+- a deliberately tiny read-only storage microprobe against the same existing 4.16 GB model shard (8 buffered reads × 4 MiB, one thread) measured about **1.62 GB/s native E:** versus **0.17 GB/s through WSL /mnt/e**, roughly 9.5×. This is only a 32 MiB cache-sensitive coexistence probe, not a publishable storage benchmark, but it strongly justifies the later full native/ext4/drvfs A/B.
 
 Minimal-footprint policy during the live WSL agent run:
 - do not load the ~202 GB production model natively while WSL owns the inference RAM/VRAM working set;
