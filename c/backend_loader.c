@@ -129,6 +129,7 @@ typedef int (*fn_attention_project_batch_dev)(ColiCudaTensor *kv_b,ColiCudaTenso
 typedef int (*fn_attention_project_batch_dev_out)(ColiCudaTensor *kv_b,ColiCudaTensor *o_proj, float *out_dev,const float *q_dev,const float *latent_dev,const float *rope_dev, int S,int H,int Q,int R,int V,int K,int T,float scale);
 typedef int (*fn_attention_absorbed_sparse_batch)(ColiCudaTensor *v_proj,float *ctx,const float *q_abs,const float *latent,const int *selected,int S,int H,int V,int K,int T,int width,float scale);
 typedef int (*fn_attention_absorbed_sparse_project_batch)(ColiCudaTensor *v_proj,ColiCudaTensor *o_proj,float *out,const float *q_abs,const float *latent,const int *selected,int S,int H,int V,int K,int T,int width,float scale);
+typedef int (*fn_expert_group_clamped)(ColiCudaTensor *const *gates,ColiCudaTensor *const *ups,ColiCudaTensor *const *downs,const int *rows,int count,float *y,const float *x,float swiglu_limit);
 typedef int (*fn_expert_group_clamped_resident)(ColiCudaTensor *const *gates,ColiCudaTensor *const *ups,ColiCudaTensor *const *downs,const int *rows,int count,float *y,const float *x,float swiglu_limit);
 typedef int (*fn_expert_group_host_clamped)(const uint8_t *const *gate_w,const float *const *gate_s,const uint8_t *const *up_w,const float *const *up_s,const uint8_t *const *down_w,const float *const *down_s,const int *rows,int count,int D,int I,int gs,int device,float *y,const float *x,float swiglu_limit);
 typedef int (*fn_group_resident_issue_clamped)(ColiCudaTensor *const *gates,ColiCudaTensor *const *ups,ColiCudaTensor *const *downs,const float *weights,int count,int home_device,const float *x_src_dev,float *partial_slot_dev,float swiglu_limit);
@@ -205,6 +206,7 @@ static struct {
     fn_attention_project_batch_dev_out attention_project_batch_dev_out;
     fn_attention_absorbed_sparse_batch attention_absorbed_sparse_batch;
     fn_attention_absorbed_sparse_project_batch attention_absorbed_sparse_project_batch;
+    fn_expert_group_clamped expert_group_clamped;
     fn_expert_group_clamped_resident expert_group_clamped_resident;
     fn_expert_group_host_clamped expert_group_host_clamped;
     fn_pipe_add pipe_add;
@@ -1471,6 +1473,7 @@ static int coli_cuda_load(void){
     RESOLVE(attention_project_batch_dev_out, fn_attention_project_batch_dev_out)
     RESOLVE(attention_absorbed_sparse_batch, fn_attention_absorbed_sparse_batch)
     RESOLVE(attention_absorbed_sparse_project_batch, fn_attention_absorbed_sparse_project_batch)
+    RESOLVE(expert_group_clamped, fn_expert_group_clamped)
     RESOLVE(expert_group_clamped_resident, fn_expert_group_clamped_resident)
     RESOLVE(expert_group_host_clamped, fn_expert_group_host_clamped)
     RESOLVE(pipe_add, fn_pipe_add)
@@ -1622,6 +1625,15 @@ int coli_cuda_expert_group_pinned(ColiCudaTensor *const *gates,
         return g_cuda.expert_group_pinned(gates,ups,downs,rows,count,y,x,pin_small_batch);
     if(pin_small_batch) return 0; /* old DLL: preserve SPEC_PIN via the CPU fallback */
     return g_cuda.expert_group(gates,ups,downs,rows,count,y,x);
+}
+
+int coli_cuda_expert_group_clamped(ColiCudaTensor *const *gates,
+                                   ColiCudaTensor *const *ups,
+                                   ColiCudaTensor *const *downs,
+                                   const int *rows,int count,
+                                   float *y,const float *x,float swiglu_limit){
+    if(!g_cuda.available || !g_cuda.expert_group_clamped) return 0;
+    return g_cuda.expert_group_clamped(gates,ups,downs,rows,count,y,x,swiglu_limit);
 }
 
 int coli_cuda_expert_group_clamped_resident(ColiCudaTensor *const *gates,
