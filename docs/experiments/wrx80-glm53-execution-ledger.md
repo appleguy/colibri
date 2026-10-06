@@ -636,3 +636,7 @@ The global CHAIN=1 short run is queued safely behind full-model comparison marsh
 ### U10.2 global CHAIN=1 result
 
 Exact-source global CHAIN=1 completed cleanly at 1.170 tok/s (8 tokens / 6.8 s), with authoritative indexer 8/8 and fallback=0. Cumulative forward-13 attention/FFN/router/indexer were 124.041 / 98.597 / 19.071 / 3.090 s. Peak VRAM was 22,795.5 MiB with 1,768 MiB free. CHAIN resident-input coverage was only 12.2% (88/720 pre-sites), and complete resident expert sets were 0/336. The result is ~9.9% below frozen G1, but the next attribution step is a same-source/current-history CHAIN=0 control before enabling fair residency.
+
+### U10.3a frozen-history attribution fixture
+
+Prepared a paired exact-source CHAIN=0/CHAIN=1 attribution manifest at commit 0e046f4. Both runs start from byte-identical private COLI_USAGE files cloned from frozen seed SHA-256 47A50E117F6E3CC5DDC1EC490081006F3F33FD97CBD058C8D222B5BE7CACD6BA, so expert-history mutation cannot confound the comparison. Fair residency remains disabled.

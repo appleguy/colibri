@@ -311,14 +311,14 @@ Use the full model to answer:
 
 ## Current execution cursor
 
-ACTIVE: U10.3.
+ACTIVE: U10.3b.
 
 Exact next actions:
-1. Do not enable the fair CHAIN=1 arm yet.
-2. Add/run an exact-source CHAIN=0 global-residency control from the same detached fb61f73 worktree, with the same current usage history and benchmark settings as U10.2.
-3. Compare CHAIN=1 vs that same-source CHAIN=0 control on decode tok/s, attention/FFN/router/indexer totals, VRAM, GPU-utilization tail, and CPU-time tail.
-4. If CHAIN=1 remains materially slower, attribute the delta to chain plumbing and inspect the low 12.2% chain-residency rate before changing residency policy.
-5. Only consider the fair CHAIN=1 arm after the CHAIN=1-vs-CHAIN=0 attribution is clean.
+1. Verify no glm53 process is active and the GPU is idle.
+2. Verify usage-seed.bin, usage-chain0.bin, and usage-chain1.bin still share SHA-256 47A50E117F6E3CC5DDC1EC490081006F3F33FD97CBD058C8D222B5BE7CACD6BA before launch.
+3. Launch c/scripts/wrx80_glm53_u10_chain_attribution.json from the exact detached fb61f73 worktree.
+4. Preserve both result packages and compare CHAIN=0 vs CHAIN=1 on decode tok/s, attention/FFN/router/indexer totals, VRAM, GPU-utilization tail, CPU-time tail, and chain-residency counters.
+5. Keep fair residency disabled until this paired attribution is reviewed.
 
 Independent work allowed while U00/U01 inference is active:
 - offline U40 residency simulation improvements;
@@ -422,3 +422,15 @@ U01 is cleared. ACTIVE next unit: U10.1, prepare the first real CHAIN=1 short A/
 - CHAIN=1 resident input coverage: 88/720 pre-sites = 12.2%.
 - Telemetry tail 8 s: GPU utilization avg 13.5% / max 18%, power avg 71.5 W, CPU delta 35.31 s over ~7.9 s = ~4.45 CPU cores.
 - Interpretation is not yet final because frozen G1 is from an earlier run state. Next attribution gate is a same-source/current-history CHAIN=0 control before enabling fair residency.
+
+
+### U10.3a frozen-history attribution fixture - COMPLETE
+
+- Exact source worktree: E:\\z-src\\colibri-u01-chain2 at fb61f73049914c2a73ef03d2527e4b2f0eb08649.
+- Manifest: c/scripts/wrx80_glm53_u10_chain_attribution.json.
+- Manifest commit: 0e046f4 (glm53-add-u10-frozen-history-chain-ab).
+- Frozen usage seed: E:\\z-results\\glm53-native-2026-10-06\\u10-attribution\\usage-seed.bin.
+- Private per-run copies: usage-chain0.bin and usage-chain1.bin.
+- All three files are 148,122 bytes with SHA-256 47A50E117F6E3CC5DDC1EC490081006F3F33FD97CBD058C8D222B5BE7CACD6BA.
+- Both enabled runs use global residency, ATTN=1, ROUTER=1, INDEXER=1, sparse profiling off, identical prompt/decode settings, and differ only in CHAIN=0 vs CHAIN=1 plus their private COLI_USAGE copy.
+- The shared model .coli_usage file is not used by this attribution pair.
