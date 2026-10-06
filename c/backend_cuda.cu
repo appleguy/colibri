@@ -682,6 +682,14 @@ __global__ static void silu_mul(float *gate, const float *up, size_t n) {
         gate[i] = (v / (1.0f + expf(-v))) * up[i];
     }
 }
+__global__ static void swiglu_clamped_pipe(float *gate,const float *up,size_t n,float limit){
+    size_t i=(size_t)blockIdx.x*blockDim.x+threadIdx.x;
+    if(i<n){
+        float g=gate[i]>limit?limit:gate[i];
+        float u=up[i]<-limit?-limit:(up[i]>limit?limit:up[i]);
+        gate[i]=(g/(1.0f+expf(-g)))*u;
+    }
+}
 
 __global__ static void situ_mul(float *gate, const float *up, size_t n, float b1, float b2) {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
@@ -3450,6 +3458,14 @@ extern "C" int coli_cuda_pipe_silu_mul(int device,float *gate_dev,const float *u
     DeviceContext *ctx=find_ctx(device); if(!n||!select_ctx(ctx)) return 0;
     silu_mul<<<(unsigned)((n+255)/256),256>>>(gate_dev,up_dev,n);
     return cuda_ok(cudaGetLastError(),"pipe silu mul");
+}
+extern "C" int coli_cuda_pipe_swiglu_clamped(int device,float *gate_dev,
+        const float *up_dev,size_t n,float limit){
+    if(fault_injected()||!gate_dev||!up_dev||!n||
+       !(limit>0.f)||!std::isfinite(limit)) return 0;
+    DeviceContext *ctx=find_ctx(device); if(!select_ctx(ctx)) return 0;
+    swiglu_clamped_pipe<<<(unsigned)((n+255)/256),256>>>(gate_dev,up_dev,n,limit);
+    return cuda_ok(cudaGetLastError(),"pipe swiglu clamped");
 }
 extern "C" int coli_cuda_pipe_add(int device,float *x_dev,const float *t_dev,size_t n){
     if (fault_injected()) return 0;

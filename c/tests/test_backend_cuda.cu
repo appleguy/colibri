@@ -791,6 +791,35 @@ int main(int argc, char **argv) {
     coli_cuda_tensor_free(cg4);coli_cuda_tensor_free(cu4);coli_cuda_tensor_free(cd4);
     coli_cuda_tensor_free(g4);coli_cuda_tensor_free(u4);coli_cuda_tensor_free(d4);
 
+    /* GLM-5.3 pipe SwiGLU must match its asymmetric clamp contract:
+     * positive-only gate cap, symmetric up cap, then SiLU(gate)*up. */
+    {
+        constexpr int N=6;
+        float gate[N]={10.f,-10.f,2.f,-2.f,0.25f,4.f};
+        float up[N]={10.f,-10.f,.5f,-.5f,8.f,-8.f};
+        float want[N];
+        const float limit=3.f;
+        for(int i=0;i<N;i++){
+            float g=gate[i]>limit?limit:gate[i];
+            float u=up[i]<-limit?-limit:(up[i]>limit?limit:up[i]);
+            want[i]=(g/(1.f+std::exp(-g)))*u;
+        }
+        float got[N];
+        float *gd=(float*)coli_cuda_pipe_alloc(d0,sizeof(gate));
+        float *ud=(float*)coli_cuda_pipe_alloc(d0,sizeof(up));
+        if(!gd||!ud||
+           !coli_cuda_pipe_upload(d0,gd,gate,sizeof(gate))||
+           !coli_cuda_pipe_upload(d0,ud,up,sizeof(up))||
+           !coli_cuda_pipe_swiglu_clamped(d0,gd,ud,N,limit)||
+           !coli_cuda_pipe_download(d0,gd,got,sizeof(got))||
+           !close_enough(got,want,N)){
+            std::fprintf(stderr,"CUDA clamped pipe SwiGLU mismatch\n");
+            return 1;
+        }
+        coli_cuda_pipe_free(d0,ud);
+        coli_cuda_pipe_free(d0,gd);
+    }
+
     /* GLM-5.3 decode router contract: correction bias changes selection, while
      * the normalized route weights come from the raw sigmoid logits. */
     {

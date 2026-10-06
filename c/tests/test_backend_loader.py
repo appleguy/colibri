@@ -918,7 +918,7 @@ class LoaderStubFixtureTest(unittest.TestCase):
             cls.fixture = None
 
     def test_abi_is_derived_from_the_loader_source(self):
-        """56 mandatory + 9 optional, parsed from backend_loader.c.
+        """57 mandatory + 9 optional, parsed from backend_loader.c.
 
         The counts are a deliberate tripwire: adding a RESOLVE to the loader
         widens the ABI every Windows DLL must satisfy, and that should be a
@@ -928,9 +928,9 @@ class LoaderStubFixtureTest(unittest.TestCase):
         just a different integer.
         """
         f = self.fixture
-        self.assertEqual(len(f.mandatory), 56)
+        self.assertEqual(len(f.mandatory), 57)
         self.assertEqual(len(f.optional), 9)   # +expert_mxfp4: optional Kimi SiTU pipeline
-        self.assertEqual(len(f.exports), 65)
+        self.assertEqual(len(f.exports), 66)
         self.assertEqual(len(f.exports), len(f.mandatory) + len(f.optional))
         self.assertIn("coli_cuda_init", f.mandatory)
         self.assertIn("coli_cuda_e8_set_grid", f.optional)
@@ -944,6 +944,7 @@ class LoaderStubFixtureTest(unittest.TestCase):
         self.assertIn("coli_cuda_attention_absorbed_sparse_project_batch_dev_out", f.mandatory)
         self.assertIn("coli_cuda_pipe_hc_pre", f.mandatory)
         self.assertIn("coli_cuda_pipe_hc_post", f.mandatory)
+        self.assertIn("coli_cuda_pipe_swiglu_clamped", f.mandatory)
         self.assertIn("coli_cuda_expert_group_clamped", f.mandatory)
         self.assertIn("coli_cuda_expert_group_clamped_resident", f.mandatory)
         self.assertIn("coli_cuda_expert_group_host_clamped", f.mandatory)

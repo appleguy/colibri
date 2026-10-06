@@ -153,6 +153,7 @@ typedef int (*fn_pipe_rope_base)(int device,float *v_dev,int pos_base,int rows, 
 typedef int (*fn_pipe_rows_add)(int device,float *x_dev,const float *partial_dev, const int *rows_dev,int nrows,int D);
 typedef float * (*fn_pipe_scratch)(int device,int slot,size_t bytes);
 typedef int (*fn_pipe_silu_mul)(int device,float *gate_dev,const float *up_dev,size_t n);
+typedef int (*fn_pipe_swiglu_clamped)(int device,float *gate_dev,const float *up_dev,size_t n,float limit);
 typedef int (*fn_pipe_sync)(int device);
 typedef int (*fn_pipe_upload)(int device,void *dst,const void *src,size_t bytes);
 typedef int (*fn_shared_mlp_w4a16)(ColiCudaTensor *gate, ColiCudaTensor *up, ColiCudaTensor *down, float *y, const float *x, int S);
@@ -233,6 +234,7 @@ static struct {
     fn_pipe_rows_add pipe_rows_add;
     fn_pipe_scratch pipe_scratch;
     fn_pipe_silu_mul pipe_silu_mul;
+    fn_pipe_swiglu_clamped pipe_swiglu_clamped;
     fn_pipe_sync pipe_sync;
     fn_pipe_upload pipe_upload;
     fn_shared_mlp_w4a16 shared_mlp_w4a16;
@@ -1503,6 +1505,7 @@ static int coli_cuda_load(void){
     RESOLVE(pipe_rows_add, fn_pipe_rows_add)
     RESOLVE(pipe_scratch, fn_pipe_scratch)
     RESOLVE(pipe_silu_mul, fn_pipe_silu_mul)
+    RESOLVE(pipe_swiglu_clamped, fn_pipe_swiglu_clamped)
     RESOLVE(pipe_sync, fn_pipe_sync)
     RESOLVE(pipe_upload, fn_pipe_upload)
     RESOLVE(shared_mlp_w4a16, fn_shared_mlp_w4a16)
@@ -1924,6 +1927,11 @@ float * coli_cuda_pipe_scratch(int device,int slot,size_t bytes){
 int coli_cuda_pipe_silu_mul(int device,float *gate_dev,const float *up_dev,size_t n){
     if(!g_cuda.available){ return 0; }
     return g_cuda.pipe_silu_mul(device, gate_dev, up_dev, n);
+}
+
+int coli_cuda_pipe_swiglu_clamped(int device,float *gate_dev,const float *up_dev,size_t n,float limit){
+    if(!g_cuda.available){ return 0; }
+    return g_cuda.pipe_swiglu_clamped(device, gate_dev, up_dev, n, limit);
 }
 
 int coli_cuda_pipe_sync(int device){
