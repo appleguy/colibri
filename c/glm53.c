@@ -3273,6 +3273,15 @@ static float *forward_span(GModel *m, GSession *s, const int *tokens, int n,
         mv(logits + (size_t)t * c->vocab, &m->head, normed + (size_t)t * D);
     m->t_head += now_s() - t_head0;
     m->forwards++;
+    if (getenv("PROF")) {
+        const char *pe = getenv("GLM53_PROF_EVERY");
+        const long every = pe && *pe ? strtol(pe, NULL, 10) : 0;
+        if (every > 0 && (m->forwards % (uint64_t)every) == 0)
+            fprintf(stderr,
+                    "[PROF] GLM53 rolling forwards=%llu attn=%.3f ffn=%.3f disk=%.3f head=%.3f\n",
+                    (unsigned long long)m->forwards,
+                    m->t_attn, m->t_ffn, m->t_disk, m->t_head);
+    }
 
     free(normed); free(collapsed);
     free(next); free(streams);
