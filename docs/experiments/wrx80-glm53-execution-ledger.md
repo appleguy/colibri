@@ -139,6 +139,7 @@ Completed checkpoints:
 - `da318128` adds an opt-in `COLI_CUDA_GLM53_ROUTER=1` S=1 router. Router/bias weights are lazily resident on the 4090, only the current hidden row is uploaded, and top-k indices/weights return through the existing device router. Any CUDA allocation/upload/router failure falls back before route tracing to the unchanged CPU path. The backend test explicitly verifies GLM's correction-bias selection versus raw-sigmoid normalized weights; CPU and CUDA-linked GLM builds pass.
 - `5b335f09` adds `COLI_CUDA_GLM53_ROUTER=2` qualification mode: GPU routing runs, but the scalar CPU router remains authoritative and selection/weight drift is reported. This is the deployment gate before mode 1 becomes a trusted runtime optimization.
 - `0979097e` prewarms all 42 sparse-layer router matrices+biases before the resident-expert tier is sized, eliminating first-decode lazy uploads and making expert residency account for router VRAM first. The checkpoint's raw router payload is **189.1 MiB** for the actual 4096-hidden/288-expert model; startup logs the real `cudaMemGetInfo` charge because allocator padding can be larger. CPU and CUDA-linked builds pass.
+- `54c32afb` moves S=1 router logits/select plus its tiny host readback onto the per-device stream and synchronizes only that stream for the host-visible top-k result. CUDA backend parity and CPU/CUDA-linked GLM builds pass; this removes another default-stream boundary from the device-normalized FFN path.
 
 Work:
 - deploy mode 2 at the next safe restart and qualify route parity over real decode;
