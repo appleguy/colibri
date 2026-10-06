@@ -3652,7 +3652,7 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
     float *post = malloc((size_t)n * H * sizeof(float));
     float *comb = malloc((size_t)n * H * H * sizeof(float));
 #ifdef COLI_CUDA
-    const int chain_mode = cuda_chain_mode();
+    const int chain_mode = n == 1 ? cuda_chain_mode() : 0;
     float *chain_verify = chain_mode == 2
         ? malloc((size_t)n * H * D * sizeof(float)) : NULL;
     float *chain_pre_norm_verify = chain_mode == 2
