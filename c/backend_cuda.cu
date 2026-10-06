@@ -3141,15 +3141,16 @@ __global__ static void sum_slots(float *dst,const float *slots,int n,int D){
         dst[i]=acc;
     }
 }
-extern "C" int coli_cuda_expert_group_resident_issue(ColiCudaTensor *const *gates,
+static int expert_group_resident_issue_impl(ColiCudaTensor *const *gates,
         ColiCudaTensor *const *ups, ColiCudaTensor *const *downs,
         const float *weights, int count,
-        int home_device, const float *x_src_dev, float *partial_slot_dev){
+        int home_device, const float *x_src_dev, float *partial_slot_dev,
+        float swiglu_limit){
     if(!gates||!ups||!downs||!weights||count<1||count>64||!x_src_dev||!partial_slot_dev) return 0;
     ColiCudaTensor *first=gates[0]; if(!first) return 0;
     int device=first->device,D=first->I,I=first->O;
     GroupDesc host[64];
-    int total=0,all_s4=1;
+    int total=0,all_s4=1,all_g4=1;
     for(int c=0;c<count;c++){
         ColiCudaTensor *g=gates[c],*u=ups[c],*d=downs[c];
         if(!g||!u||!d||g->device!=device||u->device!=device||d->device!=device||
@@ -3158,9 +3159,13 @@ extern "C" int coli_cuda_expert_group_resident_issue(ColiCudaTensor *const *gate
                  g->fmt,u->fmt,d->fmt,1,total,
                  g->gs,u->gs,d->gs};
         all_s4&=g->fmt==2&&u->fmt==2&&d->fmt==2;
+        all_g4&=g->fmt==4&&u->fmt==4&&d->fmt==4&&
+                !(g->gs&1)&&!(u->gs&1)&&!(d->gs&1);
         total++;
     }
-    if(!all_s4) return 0;                       /* resident path: per-row int4 only */
+    if(swiglu_limit>0.f){
+        if(!std::isfinite(swiglu_limit)||!all_g4) return 0;
+    }else if(!all_s4) return 0;
     DeviceContext *ctx=find_ctx(device); if(!select_ctx(ctx)) return 0;
     if(!prepare_group_weights(ctx,gates,ups,downs,count,host)) return 0;
     if(!ctx->ev_done_ok){
@@ -3168,7 +3173,7 @@ extern "C" int coli_cuda_expert_group_resident_issue(ColiCudaTensor *const *gate
                     "resident group event")) return 0;
         ctx->ev_done_ok=1;
     }
-    /* size for the 64-expert cap, not for `count`: reserve() reallocs on growth,
+    /* size for the 64-expert cap, not for count: reserve() reallocs on growth,
      * and a realloc here could free a buffer the PREVIOUS layer's still-queued
      * async work on this stream reads. Fixed caps make re-issue realloc-free. */
     size_t xb=(size_t)64*D*sizeof(float), ib=(size_t)64*I*sizeof(float);
@@ -3184,21 +3189,45 @@ extern "C" int coli_cuda_expert_group_resident_issue(ColiCudaTensor *const *gate
                                 cudaMemcpyHostToDevice,ctx->stream),"resident group weights"))
         return 0;
     /* input row: P2P from the home device. The caller guarantees x_src_dev is
-     * materialized (the pre-moe nrm download already synced the home stream). */
+     * materialized before issue. */
     if(!cuda_ok(cudaMemcpyPeerAsync(ctx->x,device,x_src_dev,home_device,
                                     (size_t)D*sizeof(float),ctx->stream),"resident group x p2p"))
         return 0;
-    bcast_row<<<64,256,0,ctx->stream>>>(ctx->x,ctx->x,count,D);   /* row 0 -> rows 1..count-1 (in-place safe: row 0 rewritten with itself) */
+    bcast_row<<<64,256,0,ctx->stream>>>(ctx->x,ctx->x,count,D);
     GroupDesc *dev=(GroupDesc*)ctx->group_desc;
     dim3 hg((unsigned)I,1,(unsigned)count),og((unsigned)D,1,(unsigned)count);
-    grouped_hidden_w4_dual<<<hg,256,0,ctx->stream>>>(ctx->gate,ctx->up,ctx->x,dev,I,D);  /* silu fused in epilogue */
-    grouped_down_w4<<<og,256,0,ctx->stream>>>(ctx->y,ctx->gate,dev,D,I);
+    if(swiglu_limit>0.f){
+        grouped_hidden_g4_dual<<<hg,256,0,ctx->stream>>>(
+            ctx->gate,ctx->up,ctx->x,dev,I,D,swiglu_limit);
+        grouped_down_g4<<<og,256,0,ctx->stream>>>(ctx->y,ctx->gate,dev,D,I);
+    }else{
+        grouped_hidden_w4_dual<<<hg,256,0,ctx->stream>>>(
+            ctx->gate,ctx->up,ctx->x,dev,I,D);
+        grouped_down_w4<<<og,256,0,ctx->stream>>>(ctx->y,ctx->gate,dev,D,I);
+    }
     weighted_sum_rows<<<48,256,0,ctx->stream>>>(partial_local,ctx->y,w_dev,count,D);
     if(!cuda_ok(cudaMemcpyPeerAsync(partial_slot_dev,home_device,partial_local,device,
                                     (size_t)D*sizeof(float),ctx->stream),"resident partial p2p"))
         return 0;
     if(!cuda_ok(cudaEventRecord(ctx->ev_done,ctx->stream),"resident event record")) return 0;
     return cuda_ok(cudaGetLastError(),"resident group launch");
+}
+
+extern "C" int coli_cuda_expert_group_resident_issue(ColiCudaTensor *const *gates,
+        ColiCudaTensor *const *ups, ColiCudaTensor *const *downs,
+        const float *weights, int count,
+        int home_device, const float *x_src_dev, float *partial_slot_dev){
+    return expert_group_resident_issue_impl(
+        gates,ups,downs,weights,count,home_device,x_src_dev,partial_slot_dev,0.f);
+}
+
+extern "C" int coli_cuda_expert_group_resident_issue_clamped(
+        ColiCudaTensor *const *gates, ColiCudaTensor *const *ups,
+        ColiCudaTensor *const *downs, const float *weights, int count,
+        int home_device, const float *x_src_dev, float *partial_slot_dev,
+        float swiglu_limit){
+    return expert_group_resident_issue_impl(
+        gates,ups,downs,weights,count,home_device,x_src_dev,partial_slot_dev,swiglu_limit);
 }
 extern "C" int coli_cuda_expert_group_resident_take(int home_device,const int *devices,int n_issued,
                                            float *slots_dev,float *acc_dev,int D){

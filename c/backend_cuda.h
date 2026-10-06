@@ -320,6 +320,11 @@ COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_resident_issue(ColiCudaTensor *co
         ColiCudaTensor *const *ups, ColiCudaTensor *const *downs,
         const float *weights, int count,
         int home_device, const float *x_src_dev, float *partial_slot_dev);
+COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_resident_issue_clamped(
+        ColiCudaTensor *const *gates, ColiCudaTensor *const *ups,
+        ColiCudaTensor *const *downs, const float *weights, int count,
+        int home_device, const float *x_src_dev, float *partial_slot_dev,
+        float swiglu_limit);
 COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_resident_take(int home_device,const int *devices,
         int n_issued,float *slots_dev,float *acc_dev,int D);
 COLI_CUDA_DLLEXPORT int coli_cuda_pipe_router(int device,const float *x_dev,

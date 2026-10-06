@@ -593,11 +593,38 @@ int main(int argc, char **argv) {
         std::fprintf(stderr,"resident clamped CUDA group differs from generic clamped path\n");
         return 1;
     }
+    /* Decode-style async resident issue/take must support GLM-5.3 grouped
+     * int4 + clamped SwiGLU too. One expert, one row, gate=1 makes the
+     * weighted reduction exactly the synchronous resident reference. */
+    {
+        ColiCudaTensor *ag[1]={cg4}, *au[1]={cu4}, *ad[1]={cd4};
+        int one_row[1]={1}, one_dev[1]={d0};
+        float one_ref[32], one_got[32], one_weight[1]={1.f};
+        if(!coli_cuda_expert_group_clamped_resident(
+                ag,au,ad,one_row,1,one_ref,gx4,6.f)) return 1;
+        float *x_dev=(float*)coli_cuda_pipe_alloc(d0,32*sizeof(float));
+        float *slot_dev=(float*)coli_cuda_pipe_alloc(d0,32*sizeof(float));
+        float *acc_dev=(float*)coli_cuda_pipe_alloc(d0,32*sizeof(float));
+        if(!x_dev||!slot_dev||!acc_dev ||
+           !coli_cuda_pipe_upload(d0,x_dev,gx4,32*sizeof(float)) ||
+           !coli_cuda_expert_group_resident_issue_clamped(
+                ag,au,ad,one_weight,1,d0,x_dev,slot_dev,6.f) ||
+           !coli_cuda_expert_group_resident_take(
+                d0,one_dev,1,slot_dev,acc_dev,32) ||
+           !coli_cuda_pipe_download(d0,acc_dev,one_got,32*sizeof(float)) ||
+           std::memcmp(one_ref,one_got,sizeof(one_ref))){
+            std::fprintf(stderr,"async resident clamped issue/take differs from sync path\n");
+            return 1;
+        }
+        coli_cuda_pipe_free(d0,x_dev);
+        coli_cuda_pipe_free(d0,slot_dev);
+        coli_cuda_pipe_free(d0,acc_dev);
+    }
     coli_cuda_tensor_free(cg4);coli_cuda_tensor_free(cu4);coli_cuda_tensor_free(cd4);
     coli_cuda_tensor_free(g4);coli_cuda_tensor_free(u4);coli_cuda_tensor_free(d4);
     uint64_t group_calls=0,group_experts=0,group_total_rows=0;
     coli_cuda_group_stats(&group_calls,&group_experts,&group_total_rows,nullptr,nullptr,nullptr);
-    if(group_calls!=8||group_experts!=16||group_total_rows!=16) return 1;
+    if(group_calls!=9||group_experts!=17||group_total_rows!=17) return 1;
 
     coli_cuda_stats(-1, &count, &bytes);
     if (count != 7 || bytes != 166) {
