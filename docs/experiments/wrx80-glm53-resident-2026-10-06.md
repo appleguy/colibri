@@ -24,3 +24,11 @@ Living checkpoint log for the dedicated WRX80 / RTX 4090 host. Keep entries smal
 5. Profile sparse CUDA MLA independently; preserve verify-first behavior until correctness and coverage are established.
 6. Only after the best resident/MLA profile is known, restart the expensive SC64 agent audit.
 
+
+## 2026-10-06 01:xx PDT — 12 GB resident + sparse MLA verify qualification
+
+- Runtime configuration had already advanced to COLI_CUDA_RESIDENT_EXPERT_GB=12, reserve 3 GB, COLI_CUDA_GLM53_ATTN=2 (verify-first).
+- Startup placed 847 hot experts using 11.17 GiB persistent VRAM and reported 11.28 GiB free immediately after placement.
+- During the fixed qualification request, total VRAM rose through roughly 13-15 GiB as lazy dense/attention state populated, still leaving about 9 GiB free and using no swap.
+- Sparse MLA verify samples for tokens 0-15 showed max absolute error at most 7.15256e-7. Relative error can look larger near zero (observed up to 0.0426316); absolute error remains tiny.
+- Important benchmark rule: COLI_CUDA_GLM53_ATTN=2 performs CUDA plus the complete CPU reference and therefore is a correctness mode, not a performance mode. Performance measurements must use mode 1 after qualification.
