@@ -1525,23 +1525,28 @@ static int cuda_router_prepare(GModel *m, GLayer *l) {
 }
 
 static int cuda_router_try(GModel *m, GLayer *l, const float *row,
+                           const float *row_dev,
                            int *chosen, float *weight, int topk) {
     const Cfg *c = &m->c;
-    if (!row || !chosen || !weight || topk < 1 || topk > 64 ||
+    if ((!row && !row_dev) || !chosen || !weight || topk < 1 || topk > 64 ||
         !cuda_router_prepare(m, l))
         return 0;
 
-    if (!m->gpu_router_x) {
-        m->gpu_router_x = (float *)coli_cuda_pipe_alloc(
-            g_cuda_device, (size_t)c->hidden * sizeof(float));
-        if (!m->gpu_router_x) return 0;
+    const float *router_x = row_dev;
+    if (!router_x) {
+        if (!m->gpu_router_x) {
+            m->gpu_router_x = (float *)coli_cuda_pipe_alloc(
+                g_cuda_device, (size_t)c->hidden * sizeof(float));
+            if (!m->gpu_router_x) return 0;
+        }
+        if (!coli_cuda_pipe_upload(g_cuda_device, m->gpu_router_x, row,
+                                   (size_t)c->hidden * sizeof(float)))
+            return 0;
+        router_x = m->gpu_router_x;
     }
-    if (!coli_cuda_pipe_upload(g_cuda_device, m->gpu_router_x, row,
-                               (size_t)c->hidden * sizeof(float)))
-        return 0;
 
     int keff = 0;
-    if (!coli_cuda_pipe_router(g_cuda_device, m->gpu_router_x,
+    if (!coli_cuda_pipe_router(g_cuda_device, router_x,
                                l->router_cuda, l->rbias_cuda,
                                c->hidden, c->n_experts, topk,
                                0.0f, 1, c->routed_scale,
@@ -2687,7 +2692,7 @@ static int cuda_moe_block(GModel *m, const LCache *cache, const int *slot_of,
  * Fare l'unione paga due volte: le letture vanno insieme, e un esperto che
  * serve a piu' token del blocco si legge una volta sola. */
 static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
-                      int tokens, float *out) {
+                      const float *x_dev, int tokens, float *out) {
     const Cfg *c = &m->c;
     const int wide = c->dense_inter > c->moe_inter ? c->dense_inter : c->moe_inter;
 
@@ -2716,7 +2721,8 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
     if (tokens == 1 && router_mode > 0) {
         int *dst_i = router_mode == 1 ? chosen : gpu_chosen;
         float *dst_w = router_mode == 1 ? weight : gpu_weight;
-        cuda_candidate = cuda_router_try(m, (GLayer *)l, x, dst_i, dst_w, topk);
+        cuda_candidate = cuda_router_try(m, (GLayer *)l, x, x_dev,
+                                         dst_i, dst_w, topk);
         cuda_routed = router_mode == 1 && cuda_candidate;
     }
 #endif
@@ -2767,8 +2773,8 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
         static int verify_reports = 0;
         if (idx_mismatch || verify_reports < 8) {
             fprintf(stderr,
-                    "[CUDA] GLM53 router verify layer=%d idx_match=%d max_weight_abs=%.7g ok=%llu mismatch=%llu\n",
-                    index, !idx_mismatch, max_abs,
+                    "[CUDA] GLM53 router verify layer=%d dev_in=%d idx_match=%d max_weight_abs=%.7g ok=%llu mismatch=%llu\n",
+                    index, x_dev != NULL, !idx_mismatch, max_abs,
                     (unsigned long long)verify_ok,
                     (unsigned long long)verify_mismatch);
             verify_reports++;
@@ -3525,9 +3531,11 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                  * rather than depending on the H*D residual bank. */
                 const float *ffn_input =
                     (chain_mode == 2 && chain_pre_ok) ? chain_pre_norm_verify : normed;
-                ffn_layer(m, l, i, ffn_input, n, branch);
+                const float *ffn_input_dev =
+                    (chain_mode == 2 && chain_pre_ok) ? chain_normed_dev : NULL;
+                ffn_layer(m, l, i, ffn_input, ffn_input_dev, n, branch);
 #else
-                ffn_layer(m, l, i, normed, n, branch);
+                ffn_layer(m, l, i, normed, NULL, n, branch);
 #endif
             }
             /* Un solo paio di letture del clock per sito, il ramo dice a chi
