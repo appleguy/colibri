@@ -93,3 +93,14 @@ Living checkpoint log for the dedicated WRX80 / RTX 4090 host. Keep entries smal
 - Reserve policy should therefore become **transient-aware**: reserve only enough space for the largest expected lazy/workspace allocation plus fragmentation margin. Do not preserve multiple GiB of idle VRAM if measurements show a smaller margin is stable.
 - Compute remains bursty: earlier 30-second mode-1 sampling at 12 GB residency saw only 2/30 nonzero one-second samples (27% and 16%), while the 21 GB near-full run produced at least one 95% sample. This indicates the GPU kernels can saturate the card, but host/CPU phases and synchronization gaps dominate duty cycle.
 - Primary performance objective: increase sustained GPU duty cycle by extending device-resident pipeline continuity (attention -> o_proj -> following operations, resident experts, reduced host round trips), while keeping total VRAM as close to physical capacity as stability allows.
+
+
+## 2026-10-06 01:xx PDT — 21 GB expert-first boundary and dense-first fix
+
+- Expert-first 21 GB placement admitted 1,483 hot experts using 19.55 GiB persistent expert VRAM and initially left 2.90 GiB free by Colibri accounting.
+- During the fixed request, lazy resident-matrix uploads consumed the remaining headroom: nvidia-smi reached 24,123 MiB used / about 20 MiB free. The process did not OOM, but this is not an acceptable steady-state reserve.
+- Before cancellation the stress run reached three forwards with cumulative rolling profile: attention 57.860 s, FFN 268.688 s, expert disk 217.404 s, head 7.847 s. Treat as stress/profile evidence, not a throughput benchmark because the request was intentionally interrupted.
+- Root cause: startup ordered hot-expert placement before ordinary resident CUDA matrices were lazily materialized.
+- Commit `60401bd` adds startup resident-matrix prewarm before CUDA expert placement, so the same requested 21 GB tier self-clamps against true remaining VRAM rather than guessed future headroom. The same commit also contained a concurrent compatible host-expert-cache prewarm implementation.
+- Host expert prewarm is enabled for the next run. It fills the already-sized RAM cache from routing history after VRAM placement, while preserving runtime miss/byte telemetry.
+- Historical repeated service restarts around 01:36-01:37 were delayed completions of earlier blocking systemctl restart commands; no persistent restart helper remained afterward.
