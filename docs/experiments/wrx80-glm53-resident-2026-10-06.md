@@ -83,3 +83,13 @@ Living checkpoint log for the dedicated WRX80 / RTX 4090 host. Keep entries smal
 - The 8-token probe was intentionally cancelled after two successful forwards instead of spending several more minutes proving the same VRAM reuse property.
 - Conclusion: 21 GB is stress-viable, but the startup reserve guard is not post-lazy-aware. Keep the user-visible 21 GB target, but future policy should reserve expected lazy CUDA state before expert admission.
 - The next dominant problem is host expert-cache warming: first-forward disk time is much larger than attention. On this dedicated high-RAM host, enable `GLM53_PREWARM_EXPERTS=1` and size `GLM53_EXPERT_GB` aggressively enough to hold essentially/all routed experts before re-benchmarking.
+
+
+## 2026-10-06 01:3x PDT — aggressive steady-state VRAM target
+
+- Updated target: optimize for **23+ GiB stable total VRAM use** on the 24,564 MiB RTX 4090, not a conservative 21-22 GiB ceiling.
+- The 21 GB resident-budget experiment placed 1,483 experts / 19.55 GiB persistent expert VRAM and then lazy dense/attention allocations drove total use to about 24,123 MiB, leaving only about 20 MiB free.
+- That state did not immediately OOM; a point sample reached 95% GPU SM utilization at the near-full VRAM state. However the service was later deliberately/repeatedly restarted by experiment control, so this does not yet prove long-duration stability at ~24.1 GiB.
+- Reserve policy should therefore become **transient-aware**: reserve only enough space for the largest expected lazy/workspace allocation plus fragmentation margin. Do not preserve multiple GiB of idle VRAM if measurements show a smaller margin is stable.
+- Compute remains bursty: earlier 30-second mode-1 sampling at 12 GB residency saw only 2/30 nonzero one-second samples (27% and 16%), while the 21 GB near-full run produced at least one 95% sample. This indicates the GPU kernels can saturate the card, but host/CPU phases and synchronization gaps dominate duty cycle.
+- Primary performance objective: increase sustained GPU duty cycle by extending device-resident pipeline continuity (attention -> o_proj -> following operations, resident experts, reduced host round trips), while keeping total VRAM as close to physical capacity as stability allows.
