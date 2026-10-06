@@ -759,7 +759,7 @@ typedef struct {
      * vuoti su Flash perche' il motore non emetteva nulla). Tempi di fase
      * cumulativi dall'avvio; il turno ne prende la differenza. */
     double t_attn, t_ffn, t_disk, t_head;
-    double t_indexer, t_router;           /* subphase attribution; included in attn/ffn */
+    double t_indexer, t_indexer_proj, t_indexer_select, t_router; /* subphase attribution; included in attn/ffn */
     double t_moe_shared, t_moe_resident, t_moe_streamed, t_moe_cpu;
     uint64_t forwards;
     uint8_t **ehit;                       /* [layer][expert] toccato in questo turno */
@@ -1360,7 +1360,10 @@ static int mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
         mv(gates + (size_t)at * ID, &l->ikpg, row);
         mv(head_w + (size_t)t * IH, &l->iwp, row);
         for (int h = 0; h < IH; h++) head_w[(size_t)t * IH + h] /= sqrtf((float)IH);
-        if (index_t0) m->t_indexer += now_s() - index_t0;
+        if (index_t0) {
+            const double dt = now_s() - index_t0;
+            m->t_indexer += dt; m->t_indexer_proj += dt;
+        }
     }
 
     const int width = coli_sparse_index_width(c->index_topk, c->index_kpool, c->index_kpool_tail);
@@ -1375,7 +1378,10 @@ static int mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
             g_cuda_device, selected, iq, ik, gates, head_w, l->ikpa, valid,
             seen, IH, ID, c->index_kpool, c->index_topk,
             c->index_kpool_tail, base);
-        if (select_t0) m->t_indexer += now_s() - select_t0;
+        if (select_t0) {
+            const double dt = now_s() - select_t0;
+            m->t_indexer += dt; m->t_indexer_select += dt;
+        }
         static uint64_t authoritative_ok = 0, authoritative_fallback = 0;
         if (selected_ready) authoritative_ok++; else authoritative_fallback++;
         static int authoritative_reports = 0;
@@ -1396,7 +1402,10 @@ static int mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
                                            c->index_kpool_tail, base, seen)) {
             fprintf(stderr, "indexer selection failed\n"); exit(1);
         }
-        if (select_t0) m->t_indexer += now_s() - select_t0;
+        if (select_t0) {
+            const double dt = now_s() - select_t0;
+            m->t_indexer += dt; m->t_indexer_select += dt;
+        }
         selected_ready = 1;
     }
 #ifdef COLI_CUDA
@@ -4115,9 +4124,10 @@ static float *forward_span(GModel *m, GSession *s, const int *tokens, int n,
         const long every = pe && *pe ? strtol(pe, NULL, 10) : 0;
         if (every > 0 && (m->forwards % (uint64_t)every) == 0)
             fprintf(stderr,
-                    "[PROF] GLM53 rolling forwards=%llu attn=%.3f indexer=%.3f ffn=%.3f router=%.3f disk=%.3f head=%.3f\n",
+                    "[PROF] GLM53 rolling forwards=%llu attn=%.3f indexer=%.3f index_proj=%.3f index_select=%.3f ffn=%.3f router=%.3f disk=%.3f head=%.3f\n",
                     (unsigned long long)m->forwards,
-                    m->t_attn, m->t_indexer, m->t_ffn, m->t_router, m->t_disk, m->t_head);
+                    m->t_attn, m->t_indexer, m->t_indexer_proj, m->t_indexer_select,
+                    m->t_ffn, m->t_router, m->t_disk, m->t_head);
         if (every > 0 && (m->forwards % (uint64_t)every) == 0)
             fprintf(stderr,
                     "[PROF] GLM53 moe shared=%.3f resident_gpu=%.3f streamed_gpu=%.3f cpu=%.3f\n",
