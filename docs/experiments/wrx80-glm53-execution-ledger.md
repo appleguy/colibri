@@ -549,3 +549,14 @@ Observed:
 - decode: **8 tokens in 6.0 s = 1.332 tok/s**.
 
 Frozen G1 was 1.299 tok/s, so this first fair-policy sample is about **2.5% faster** while dramatically improving worst-layer residency coverage. Treat the speed delta as provisional until the queued fair-repeat/global-repeat pair completes.
+
+
+### Fair-residency repeat checkpoint — 2026-10-06
+
+Queued fair-policy repeat `g2r-fair-attn1-router1-indexer1-chain0-g8` completed cleanly:
+- decode: **8 tokens in 6.1 s = 1.307 tok/s**;
+- authoritative indexer remained 8/8 successful with fallback=0;
+- cumulative forward-13 attention 110.605 s; FFN 101.122 s;
+- peak CUDA used 22,641.5 MiB, minimum free 1,922 MiB.
+
+This repeat is only ~0.6% above frozen G1 at 1.299 tok/s, so the first G2 result at 1.332 tok/s was partly favorable run variance. The structural residency improvement remains real: fair admission keeps 27..28 experts/layer and ~15.9% worst-layer historical coverage versus the global policy's ~2.4% floor. Keep fair admission as promising but not yet a decisive wall-clock winner until the queued global control repeat and sparse-profile arms complete.

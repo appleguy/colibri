@@ -468,3 +468,12 @@ Resume the WRX80 native-Windows GLM-5.3 plan from `docs/experiments/wrx80-glm53-
 - Same 1,142 resident experts / 15.06 GiB, but worst-layer historical coverage improved from ~2.4% to **15.9%** and expert count became 27..28/layer.
 - Speed result is provisional until queued fair-repeat/global-repeat controls finish.
 - Queued series also includes global/fair sparse-boundary profiling arms.
+
+
+## Fair-repeat checkpoint — 2026-10-06
+
+- G2 first fair-policy sample: 1.332 tok/s.
+- G2R fair-policy repeat: **1.307 tok/s**, still slightly above G1's 1.299 tok/s but within a range where run variance matters.
+- Structural residency benefit remains large and repeatable: ~15.9% worst-layer historical coverage with 27..28 resident experts/layer.
+- Active serialized benchmark is now the global-policy repeat. Sparse-profile global/fair arms remain queued behind it.
+- CHAIN=1 step-1 source work is staged but must not be built or committed until the active benchmark series releases the machine and the standard validation ladder passes.
