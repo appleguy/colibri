@@ -739,6 +739,9 @@ typedef struct {
     uint64_t gpu_expert_calls, gpu_expert_rows, gpu_expert_hits, gpu_expert_fallback;
     uint64_t gpu_expert_avoided_h2d_bytes;
     double gpu_expert_seconds;
+    int *gpu_resident_pos, *gpu_resident_row_ids;
+    float *gpu_resident_row_weights, *gpu_resident_xg, *gpu_resident_tmp, *gpu_resident_acc;
+    size_t gpu_resident_rows_cap, gpu_resident_union_cap, gpu_resident_tokens_cap;
 #endif
     /* Telemetria per la dashboard (#1376 follow-up: Brain e Profile erano
      * vuoti su Flash perche' il motore non emetteva nulla). Tempi di fase
@@ -2026,6 +2029,25 @@ static void cuda_resident_expert_init(GModel *m) {
     }
     free(cand);
 
+    if (m->gpu_expert_count) {
+        const size_t rows_cap = (size_t)GLM53_MOE_BATCH_ROWS * (size_t)m->c.topk;
+        const size_t tokens_cap = GLM53_MOE_BATCH_ROWS;
+        m->gpu_resident_pos = malloc(rows_cap * sizeof(*m->gpu_resident_pos));
+        m->gpu_resident_row_ids = malloc(rows_cap * sizeof(*m->gpu_resident_row_ids));
+        m->gpu_resident_row_weights = malloc(rows_cap * sizeof(*m->gpu_resident_row_weights));
+        m->gpu_resident_xg = malloc(rows_cap * (size_t)m->c.hidden * sizeof(*m->gpu_resident_xg));
+        m->gpu_resident_tmp = malloc(rows_cap * (size_t)m->c.hidden * sizeof(*m->gpu_resident_tmp));
+        m->gpu_resident_acc = malloc(tokens_cap * (size_t)m->c.hidden * sizeof(*m->gpu_resident_acc));
+        if (!m->gpu_resident_pos || !m->gpu_resident_row_ids || !m->gpu_resident_row_weights ||
+            !m->gpu_resident_xg || !m->gpu_resident_tmp || !m->gpu_resident_acc) {
+            fprintf(stderr, "OOM allocating resident CUDA MoE scratch\n");
+            exit(1);
+        }
+        m->gpu_resident_rows_cap = rows_cap;
+        m->gpu_resident_union_cap = rows_cap;
+        m->gpu_resident_tokens_cap = tokens_cap;
+    }
+
     size_t after_free = 0, after_total = 0;
     coli_cuda_mem_info(g_cuda_device, &after_free, &after_total);
     fprintf(stderr,
@@ -2064,17 +2086,20 @@ static int cuda_resident_moe(GModel *m, int layer,
     if (!m->gpu_expert || m->gpu_expert_count < 1 || tokens < 1 ||
         tokens > GLM53_MOE_BATCH_ROWS || n_union < 1) return 0;
 
-    int *resident_pos = malloc((size_t)n_union * sizeof(*resident_pos));
     const int max_rows = tokens * topk;
-    int *row_ids = malloc((size_t)max_rows * sizeof(*row_ids));
-    float *row_weights = malloc((size_t)max_rows * sizeof(*row_weights));
-    float *xg = malloc((size_t)max_rows * m->c.hidden * sizeof(*xg));
-    float *tmp = malloc((size_t)max_rows * m->c.hidden * sizeof(*tmp));
-    float *acc = calloc((size_t)tokens * m->c.hidden, sizeof(*acc));
-    if (!resident_pos || !row_ids || !row_weights || !xg || !tmp || !acc) {
-        fprintf(stderr, "OOM allocating resident CUDA MoE scratch\n");
-        exit(1);
+    if ((size_t)n_union > m->gpu_resident_union_cap ||
+        (size_t)max_rows > m->gpu_resident_rows_cap ||
+        (size_t)tokens > m->gpu_resident_tokens_cap) {
+        fprintf(stderr, "resident CUDA MoE scratch capacity exceeded\n");
+        return 0;
     }
+    int *resident_pos = m->gpu_resident_pos;
+    int *row_ids = m->gpu_resident_row_ids;
+    float *row_weights = m->gpu_resident_row_weights;
+    float *xg = m->gpu_resident_xg;
+    float *tmp = m->gpu_resident_tmp;
+    float *acc = m->gpu_resident_acc;
+    memset(acc, 0, (size_t)tokens * (size_t)m->c.hidden * sizeof(*acc));
 
     int nres = 0;
     for (int i = 0; i < n_union; i++) {
@@ -2082,10 +2107,7 @@ static int cuda_resident_moe(GModel *m, int layer,
         GpuExpert *ge = &m->gpu_expert[(size_t)layer * m->c.n_experts + eid];
         if (ge->resident) resident_pos[nres++] = i;
     }
-    if (!nres) {
-        free(acc); free(tmp); free(xg); free(row_weights); free(row_ids); free(resident_pos);
-        return 0;
-    }
+    if (!nres) return 0;
 
     int ok = 1;
     uint64_t served_rows = 0, calls = 0;
@@ -2167,7 +2189,6 @@ static int cuda_resident_moe(GModel *m, int layer,
         m->gpu_expert_fallback++;
     }
 
-    free(acc); free(tmp); free(xg); free(row_weights); free(row_ids); free(resident_pos);
     return ok;
 }
 
@@ -3024,6 +3045,12 @@ static void model_release(GModel *m) {
         free(m->gpu_expert);
         m->gpu_expert = NULL;
     }
+    free(m->gpu_resident_pos);
+    free(m->gpu_resident_row_ids);
+    free(m->gpu_resident_row_weights);
+    free(m->gpu_resident_xg);
+    free(m->gpu_resident_tmp);
+    free(m->gpu_resident_acc);
 #endif
     if (m->ecache) {
         for (int i = 0; i < m->c.n_layers; i++) {
