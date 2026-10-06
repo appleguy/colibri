@@ -158,6 +158,17 @@ static double g_device_group_h2d_ms[COLI_CUDA_MAX_DEVICES];
 static double g_device_group_kernel_ms[COLI_CUDA_MAX_DEVICES];
 static double g_device_group_d2h_ms[COLI_CUDA_MAX_DEVICES];
 static std::mutex g_group_stats_mu;
+static uint64_t g_sparse_profile_calls;
+static double g_sparse_index_wait_s,g_sparse_stage_wait_s,g_sparse_pack_s,g_sparse_h2d_enqueue_s;
+static double sparse_profile_now_s(){
+    using clock=std::chrono::steady_clock;
+    return std::chrono::duration<double>(clock::now().time_since_epoch()).count();
+}
+static int sparse_profile_enabled(){
+    static int enabled=-1;
+    if(enabled<0){const char *s=std::getenv("COLI_CUDA_SPARSE_PROFILE");enabled=s&&*s&&std::atoi(s)!=0;}
+    return enabled;
+}
 #ifdef COLI_ANS
 static FILE *g_ans_sidecar;
 static int g_ans_sidecar_pack;
@@ -2711,16 +2722,20 @@ extern "C" int coli_cuda_attention_absorbed_sparse_project_batch_dev_out(
                     "absorbed sparse upload event")) return 0;
         dc->sparse_upload_event_ok=1;
     }
+    const int sparse_prof=sparse_profile_enabled();
+    const double stage_wait_t0=(sparse_prof&&dc->sparse_upload_pending)?sparse_profile_now_s():0.0;
     if(dc->sparse_upload_pending){
         if(!cuda_ok(cudaEventSynchronize(dc->sparse_upload_done),
                     "absorbed sparse staging reuse wait")) return 0;
         dc->sparse_upload_pending=0;
     }
+    if(stage_wait_t0)g_sparse_stage_wait_s+=sparse_profile_now_s()-stage_wait_t0;
     const size_t staged_latent_bytes=compact_latent?latent_upload_bytes:0;
     if(!reserve_pinned(&dc->host_sparse,&dc->host_sparse_cap,qb+sb+staged_latent_bytes)) return 0;
     unsigned char *stage=(unsigned char*)dc->host_sparse;
     std::memcpy(stage,q_abs,qb);
     std::memcpy(stage+qb,selected,sb);
+    const double pack_t0=(sparse_prof&&compact_latent)?sparse_profile_now_s():0.0;
     if(compact_latent){
         float *packed=(float*)(stage+qb+sb);
         for(int i=0;i<width;i++){
@@ -2729,6 +2744,8 @@ extern "C" int coli_cuda_attention_absorbed_sparse_project_batch_dev_out(
             else std::memset(packed+(size_t)i*K,0,(size_t)K*sizeof(float));
         }
     }
+    if(pack_t0)g_sparse_pack_s+=sparse_profile_now_s()-pack_t0;
+    const double h2d_t0=sparse_prof?sparse_profile_now_s():0.0;
     if(!cuda_ok(cudaMemcpyAsync(dc->aq,stage,qb,cudaMemcpyHostToDevice,dc->stream),
                 "absorbed sparse q upload (dev out)")||
        !cuda_ok(cudaMemcpyAsync(dc->asel,stage+qb,sb,cudaMemcpyHostToDevice,dc->stream),
@@ -2746,6 +2763,17 @@ extern "C" int coli_cuda_attention_absorbed_sparse_project_batch_dev_out(
                     "absorbed sparse latent upload (dev out)"))return 0;
     }
     dc->sparse_upload_pending=1;
+    if(h2d_t0)g_sparse_h2d_enqueue_s+=sparse_profile_now_s()-h2d_t0;
+    if(sparse_prof&&compact_latent){
+        const uint64_t calls=++g_sparse_profile_calls;
+        if(calls<=8||(calls%64)==0)
+            std::fprintf(stderr,
+                "[CUDA] sparse profile calls=%llu index_wait=%.3fms stage_wait=%.3fms "
+                "pack=%.3fms h2d_enqueue=%.3fms\n",
+                (unsigned long long)calls,g_sparse_index_wait_s*1000.0,
+                g_sparse_stage_wait_s*1000.0,g_sparse_pack_s*1000.0,
+                g_sparse_h2d_enqueue_s*1000.0);
+    }
     size_t shared=(size_t)(width+256+K)*sizeof(float);
     attention_absorbed_sparse_kernel<<<dim3((unsigned)H,(unsigned)S),256,shared,dc->stream>>>(
         dc->ac,dc->aq,dc->al,dc->asel,v_proj->weights,v_proj->scales,v_proj->fmt,
@@ -3518,10 +3546,12 @@ extern "C" int coli_cuda_sparse_index_select_decode(int device,int *out_host,
     }
     glm_sparse_select_kernel<<<1,256,0,dc->stream>>>(
         dc->asel,dc->al,taken,cache->valid_dev,sequence,q,first,pools,pool,topk,with_tail);
-    if(!cuda_ok(cudaGetLastError(),"GLM sparse index launch")||
-       !cuda_ok(cudaMemcpyAsync(out_host,dc->asel,ob,cudaMemcpyDeviceToHost,dc->stream),
+    if(!cuda_ok(cudaGetLastError(),"GLM sparse index launch"))return 0;
+    const double profile_wait_t0=sparse_profile_enabled()?sparse_profile_now_s():0.0;
+    if(!cuda_ok(cudaMemcpyAsync(out_host,dc->asel,ob,cudaMemcpyDeviceToHost,dc->stream),
                 "GLM sparse index download")||
        !cuda_ok(cudaStreamSynchronize(dc->stream),"GLM sparse index synchronize"))return 0;
+    if(profile_wait_t0)g_sparse_index_wait_s+=sparse_profile_now_s()-profile_wait_t0;
     return 1;
 }
 
