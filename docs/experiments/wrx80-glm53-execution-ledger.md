@@ -477,3 +477,29 @@ This is a small but directionally positive result for authoritative GPU routing.
 The first marshaled B3 attempt did **not** reach model code: PowerShell Start-Process -ArgumentList flattened the prompt and glm53.exe rejected the bare word `this`. `c70ae1f` fixes prompt quoting; an argv smoke test confirmed a multiword prompt remains one argument. No B3 performance/correctness conclusion should be drawn from the failed 29 ms harness attempt.
 
 Next serialized gate: B3 with CHAIN=0, ROUTER=1, INDEXER=1, same prompt and 8-token tail. Require authoritative indexer success with zero fallback before advancing.
+
+
+### Native Windows B3 authoritative indexer + N30 profiling — 2026-10-06
+
+B3 (`CHAIN=0`, `ROUTER=1`, `INDEXER=1`) completed successfully on the same fixed 551-token prompt and 8-token decode tail:
+- authoritative sparse indexer reported **8/8 success, fallback=0**;
+- decode: **8 tokens in 7.9 s = 1.018 tok/s**;
+- peak CUDA used 22,623.5 MiB, minimum free 1,940 MiB;
+- cumulative indexer time at forward 13 was 3.059 s, split into 1.966 s projection + 1.093 s selection.
+
+This clears the N20 authoritative router/indexer short-run gate. Compared with B1/B2 (0.975 / 0.982 tok/s), authoritative index selection removes the CPU reference selector and improves the short decode result again.
+
+`bf8d61a` adds opt-in `COLI_CUDA_SPARSE_PROFILE=1` backend timing without changing the public ABI. It reports cumulative:
+- selected-index D2H + stream wait (`index_wait`);
+- sparse staging-event reuse wait (`stage_wait`);
+- compact latent host gather (`pack`);
+- q/selection/compact-latent H2D enqueue (`h2d_enqueue`).
+
+Validation for `bf8d61a`:
+- `git diff --check` clean;
+- native RTX CUDA numerical suite passed (`q8/q4/q2/f32/e8 correctness ok`);
+- CPU/native GLM build current;
+- native `coli_cuda.dll` rebuild + CUDA-linked `glm53.exe` relink passed;
+- Windows loader fixture: 12/12 tests passed.
+
+Next: run one short authoritative B3-equivalent arm with `COLI_CUDA_SPARSE_PROFILE=1`, use those measurements to choose the next attention optimization, then proceed to N40 residency policy work if the sparse boundary is not dominant.

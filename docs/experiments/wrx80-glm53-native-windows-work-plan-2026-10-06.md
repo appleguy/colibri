@@ -426,3 +426,13 @@ Resume the WRX80 native-Windows GLM-5.3 plan from `docs/experiments/wrx80-glm53-
 - The first marshaled N20.3 attempt was invalid because the PowerShell runner split the multiword prompt into separate argv words. It exited before model loading. `c70ae1f` fixes and smoke-tests prompt quoting.
 - N20.3 B3 is now the active serialized gate: CHAIN=0 / ROUTER=1 / INDEXER=1, same 551-token prompt and 8-token tail. Require authoritative indexer success and zero fallback.
 - N30 and N40 remain independent work if B3 is running or blocked.
+
+
+## Progress checkpoint — 2026-10-06 12:50 local
+
+- N20.1 B1 PASSED at 0.975 tok/s with router/indexer mode-2 qualification.
+- N20.2 B2 PASSED at 0.982 tok/s with authoritative GPU router and indexer mode-2 qualification.
+- N20.3 B3 PASSED at 1.018 tok/s with authoritative GPU router + authoritative GPU indexer; 8/8 reported indexer calls succeeded with fallback=0.
+- N20 short-run qualification is complete. The next serialized medium-context gate remains blocked until N30 telemetry is collected.
+- `bf8d61a` implements N30 sparse-boundary telemetry behind `COLI_CUDA_SPARSE_PROFILE=1` with no public ABI change. Native CUDA numerical tests, CPU/CUDA-linked builds, and the 12-test loader fixture all pass.
+- Active cursor: run one short authoritative profile arm with N30 enabled, then select the next optimization from measured `index_wait`, `stage_wait`, `pack`, and `h2d_enqueue` contribution. N40 remains the next independent lane if those costs are small.
