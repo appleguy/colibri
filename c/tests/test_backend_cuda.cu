@@ -526,6 +526,17 @@ int main(int argc, char **argv) {
         std::fprintf(stderr,"absorbed sparse CUDA attention+projection mismatch\n");
         return 1;
     }
+    float adev[AS*AO];
+    float *adev_out=(float*)coli_cuda_pipe_alloc(d0,sizeof(adev));
+    if(!adev_out||
+       !coli_cuda_attention_absorbed_sparse_project_batch_dev_out(
+            avt,opt,adev_out,aqa,ala,asel,AS,AH,AV,AK,AT,AW,.5f)||
+       !coli_cuda_pipe_download(d0,adev_out,adev,sizeof(adev))||
+       !close_enough(adev,aproj,AS*AO)){
+        std::fprintf(stderr,"absorbed sparse CUDA dev-out projection mismatch\n");
+        return 1;
+    }
+    coli_cuda_pipe_free(d0,adev_out);
     coli_cuda_tensor_free(opt);
     coli_cuda_tensor_free(avt);
 

@@ -285,6 +285,13 @@ COLI_CUDA_DLLEXPORT int coli_cuda_attention_absorbed_sparse_project_batch(
         ColiCudaTensor *v_proj,ColiCudaTensor *o_proj,float *out,
         const float *q_abs,const float *latent,const int *selected,
         int S,int H,int V,int K,int T,int width,float attention_scale);
+/* Same sparse absorbed attention + o_proj, but keep [S,O] on-device. Host
+ * inputs are still uploaded by this call, so it synchronizes before return;
+ * this removes the output D2H and enables a following device-resident stage. */
+COLI_CUDA_DLLEXPORT int coli_cuda_attention_absorbed_sparse_project_batch_dev_out(
+        ColiCudaTensor *v_proj,ColiCudaTensor *o_proj,float *out_dev,
+        const float *q_abs,const float *latent,const int *selected,
+        int S,int H,int V,int K,int T,int width,float attention_scale);
 
 COLI_CUDA_DLLEXPORT void coli_cuda_tensor_free(ColiCudaTensor *tensor);
 COLI_CUDA_DLLEXPORT size_t coli_cuda_tensor_bytes(const ColiCudaTensor *tensor);

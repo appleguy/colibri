@@ -129,6 +129,7 @@ typedef int (*fn_attention_project_batch_dev)(ColiCudaTensor *kv_b,ColiCudaTenso
 typedef int (*fn_attention_project_batch_dev_out)(ColiCudaTensor *kv_b,ColiCudaTensor *o_proj, float *out_dev,const float *q_dev,const float *latent_dev,const float *rope_dev, int S,int H,int Q,int R,int V,int K,int T,float scale);
 typedef int (*fn_attention_absorbed_sparse_batch)(ColiCudaTensor *v_proj,float *ctx,const float *q_abs,const float *latent,const int *selected,int S,int H,int V,int K,int T,int width,float scale);
 typedef int (*fn_attention_absorbed_sparse_project_batch)(ColiCudaTensor *v_proj,ColiCudaTensor *o_proj,float *out,const float *q_abs,const float *latent,const int *selected,int S,int H,int V,int K,int T,int width,float scale);
+typedef int (*fn_attention_absorbed_sparse_project_batch_dev_out)(ColiCudaTensor *v_proj,ColiCudaTensor *o_proj,float *out_dev,const float *q_abs,const float *latent,const int *selected,int S,int H,int V,int K,int T,int width,float scale);
 typedef int (*fn_expert_group_clamped)(ColiCudaTensor *const *gates,ColiCudaTensor *const *ups,ColiCudaTensor *const *downs,const int *rows,int count,float *y,const float *x,float swiglu_limit);
 typedef int (*fn_expert_group_clamped_resident)(ColiCudaTensor *const *gates,ColiCudaTensor *const *ups,ColiCudaTensor *const *downs,const int *rows,int count,float *y,const float *x,float swiglu_limit);
 typedef int (*fn_expert_group_host_clamped)(const uint8_t *const *gate_w,const float *const *gate_s,const uint8_t *const *up_w,const float *const *up_s,const uint8_t *const *down_w,const float *const *down_s,const int *rows,int count,int D,int I,int gs,int device,float *y,const float *x,float swiglu_limit);
@@ -206,6 +207,7 @@ static struct {
     fn_attention_project_batch_dev_out attention_project_batch_dev_out;
     fn_attention_absorbed_sparse_batch attention_absorbed_sparse_batch;
     fn_attention_absorbed_sparse_project_batch attention_absorbed_sparse_project_batch;
+    fn_attention_absorbed_sparse_project_batch_dev_out attention_absorbed_sparse_project_batch_dev_out;
     fn_expert_group_clamped expert_group_clamped;
     fn_expert_group_clamped_resident expert_group_clamped_resident;
     fn_expert_group_host_clamped expert_group_host_clamped;
@@ -1473,6 +1475,7 @@ static int coli_cuda_load(void){
     RESOLVE(attention_project_batch_dev_out, fn_attention_project_batch_dev_out)
     RESOLVE(attention_absorbed_sparse_batch, fn_attention_absorbed_sparse_batch)
     RESOLVE(attention_absorbed_sparse_project_batch, fn_attention_absorbed_sparse_project_batch)
+    RESOLVE(attention_absorbed_sparse_project_batch_dev_out, fn_attention_absorbed_sparse_project_batch_dev_out)
     RESOLVE(expert_group_clamped, fn_expert_group_clamped)
     RESOLVE(expert_group_clamped_resident, fn_expert_group_clamped_resident)
     RESOLVE(expert_group_host_clamped, fn_expert_group_host_clamped)
@@ -1802,6 +1805,12 @@ int coli_cuda_attention_absorbed_sparse_project_batch(ColiCudaTensor *v_proj,Col
         const float *q_abs,const float *latent,const int *selected,int S,int H,int V,int K,int T,int width,float scale){
     if(!g_cuda.available || !g_cuda.attention_absorbed_sparse_project_batch) return 0;
     return g_cuda.attention_absorbed_sparse_project_batch(v_proj,o_proj,out,q_abs,latent,selected,S,H,V,K,T,width,scale);
+}
+
+int coli_cuda_attention_absorbed_sparse_project_batch_dev_out(ColiCudaTensor *v_proj,ColiCudaTensor *o_proj,float *out_dev,
+        const float *q_abs,const float *latent,const int *selected,int S,int H,int V,int K,int T,int width,float scale){
+    if(!g_cuda.available || !g_cuda.attention_absorbed_sparse_project_batch_dev_out) return 0;
+    return g_cuda.attention_absorbed_sparse_project_batch_dev_out(v_proj,o_proj,out_dev,q_abs,latent,selected,S,H,V,K,T,width,scale);
 }
 
 int coli_cuda_pipe_add(int device,float *x_dev,const float *t_dev,size_t n){
