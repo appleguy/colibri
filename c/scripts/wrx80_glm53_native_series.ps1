@@ -81,7 +81,8 @@ foreach ($run in $cfg.runs) {
 
   Write-Host "[marshal] starting $($run.name)"
   $sw = [Diagnostics.Stopwatch]::StartNew()
-  $procArgs = @("--model", $model, "--prompt", $prompt, "--greedy", [string]$run.greedy)
+  $quotedPrompt = '"' + ($prompt -replace '"','\"') + '"'
+  $procArgs = "--model `"$model`" --prompt $quotedPrompt --greedy $($run.greedy)"
   $proc = Start-Process -FilePath $glm -WorkingDirectory (Join-Path $repo "c") -NoNewWindow -PassThru -ArgumentList $procArgs -RedirectStandardOutput $stdout -RedirectStandardError $stderr
 
   Sample-Run $proc $samples ([int]$cfg.sample_interval_ms)
