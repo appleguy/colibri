@@ -790,6 +790,20 @@ static int cuda_router_mode(void) {
 #endif
 }
 
+static int cuda_indexer_mode(void) {
+#ifdef COLI_CUDA
+    static int mode = -1;
+    if (mode < 0) {
+        const char *s = getenv("COLI_CUDA_GLM53_INDEXER");
+        mode = s && *s ? atoi(s) : 0;
+        if (mode < 0 || mode > 2) mode = 0;
+    }
+    return mode;
+#else
+    return 0;
+#endif
+}
+
 static int cuda_chain_mode(void) {
 #ifdef COLI_CUDA
     static int mode = -1;
@@ -1358,6 +1372,37 @@ static int mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
         fprintf(stderr, "indexer selection failed\n"); exit(1);
     }
     if (select_t0) m->t_indexer += now_s() - select_t0;
+#ifdef COLI_CUDA
+    if (tokens == 1 && cuda_indexer_mode() == 2 && g_cuda_ready && width <= 4096) {
+        int gpu_selected[4096];
+        const int gpu_ok = coli_cuda_sparse_index_select_decode(
+            g_cuda_device, gpu_selected, iq, ik, gates, head_w, l->ikpa, valid,
+            seen, IH, ID, c->index_kpool, c->index_topk,
+            c->index_kpool_tail, base);
+        static uint64_t verify_ok = 0, verify_mismatch = 0, verify_failed = 0;
+        int mismatch = 0, first_mismatch = -1;
+        if (gpu_ok) {
+            for (int i = 0; i < width; i++) {
+                if (gpu_selected[i] != selected[i]) {
+                    mismatch = 1; first_mismatch = i; break;
+                }
+            }
+            if (mismatch) verify_mismatch++; else verify_ok++;
+        } else {
+            verify_failed++;
+        }
+        static int verify_reports = 0;
+        if (!gpu_ok || mismatch || verify_reports < 8) {
+            fprintf(stderr,
+                    "[CUDA] GLM53 indexer verify q=%d ok=%d idx_match=%d first_mismatch=%d pass=%llu mismatch=%llu failed=%llu\n",
+                    base, gpu_ok, gpu_ok && !mismatch, first_mismatch,
+                    (unsigned long long)verify_ok,
+                    (unsigned long long)verify_mismatch,
+                    (unsigned long long)verify_failed);
+            verify_reports++;
+        }
+    }
+#endif
     /* GLM53_DUMP_INDEX=1 stampa le righe scelte dall'indexer: e' il primo
      * posto da guardare quando il motore diverge solo su certe lunghezze. */
     if (getenv("GLM53_DUMP_INDEX")) {
