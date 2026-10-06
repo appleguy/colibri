@@ -104,10 +104,11 @@ Completed checkpoints:
 - `723e1b73` lets the S=1 CUDA router consume that already-resident normalized device row directly, skipping its hidden-row H2D upload. Router mode 2 still keeps CPU selection/weights authoritative and now reports `dev_in=1` when the transfer-free input is used. CPU/CUDA-linked builds and CUDA backend correctness pass.
 - `ae41b638` adds a verification-only S=1 **resident routed-MoE from device row** path using the existing resident expert issue/take backend. It snapshots the current resident-tier host result as oracle, recomputes the same selected resident experts directly from `x_dev`, downloads one D-row contribution, and reports max absolute/relative drift. CPU/CUDA-linked builds and CUDA backend correctness pass.
 - `9bee6c1f` adds `coli_cuda_pipe_swiglu_clamped`, matching GLM-5.3's asymmetric SwiGLU contract exactly: positive-only gate clamp, symmetric up clamp, then SiLU(gate)×up. CUDA numerical parity, Linux loader/header parity, and native-Windows ABI (`57 mandatory + 9 optional`) all pass. This is the prerequisite for moving the always-on shared expert onto the resident device row without changing model math.
+- `2351d9d1` completes the S=1 **shared expert from resident device row** verification path: resident `rg/ru/rd` matrices run `pipe_gemm -> pipe_gemm -> pipe_swiglu_clamped -> pipe_gemm` from `x_dev`, then one D-row is downloaded and compared with the existing host shared-expert result. CPU and CUDA-linked GLM builds pass; host output remains authoritative until real-run parity.
 
 Work:
-- verify the shared expert directly from the resident normalized device row, then make it authoritative only after real-run parity;
-- once real-run parity is clean, make the device-row resident routed-expert contribution authoritative and avoid its host activation staging;
+- refactor shared/resident-routed verification helpers to retain D-row contributions on device so they can be summed before mHC post;
+- after real-run parity, make the shared expert and device-row resident routed-expert contributions authoritative and avoid their host activation staging;
 - preserve residual stream across layer boundaries;
 - replace broad synchronizations with dependency-local synchronization.
 
