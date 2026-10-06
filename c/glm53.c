@@ -1976,6 +1976,17 @@ static void cuda_resident_expert_init(GModel *m) {
         const int layer = cand[ci].layer, eid = cand[ci].eid;
         GpuExpert *ge = &m->gpu_expert[(size_t)layer * m->c.n_experts + eid];
 
+        /* Re-check actual device headroom on every admission. The startup
+         * snapshot cannot account for driver/lazy allocations that happen
+         * while the tier is being built. m->e_slot is the expert's logical
+         * weight+scale footprint; the extra 64 MiB absorbs allocator padding
+         * until tensor_vram() gives us the exact post-upload charge. */
+        size_t live_free = 0, live_total = 0;
+        const size_t admission_margin = (size_t)64 << 20;
+        if (!coli_cuda_mem_info(g_cuda_device, &live_free, &live_total) ||
+            live_free <= reserve_b + (size_t)m->e_slot + admission_margin)
+            break;
+
         Slot slot;
         memset(&slot, 0, sizeof(slot));
         slot.eid = -1;
