@@ -1,0 +1,7 @@
+final_health
+{"status":"ok","scheduler":{"active":0,"queued":0,"capacity":1,"max_queue":4,"queue_timeout_seconds":7200.0,"admitted":12,"completed":11,"failed":0,"rejected":0,"timed_out":0,"cancelled":1},"kv_slots":1,"continue_assistant":true}
+gpu
+NVIDIA GeForce RTX 4090, 20800 MiB, 3343 MiB, 0 %, 61.45 W
+service
+ExecStart={ path=/home/tech/.local/bin/wrx80-colibri-flash-server ; argv[]=/home/tech/.local/bin/wrx80-colibri-flash-server ; ignore_errors=no ; start_time=[Tue 2026-10-06 01:52:28 PDT] ; stop_time=[n/a] ; pid=44688 ; code=(null) ; status=0/0 }
+Environment=HOME=/home/tech PATH=/home/tech/.local/bin:/usr/local/bin:/usr/bin:/bin OMP_NUM_THREADS=16 COLI_CUDA=1 COLI_CUDA_RESIDENT_EXPERT_GB=21 COLI_CUDA_RESIDENT_RESERVE_GB=3 PROF=1 COLI_CUDA_GLM53_ATTN=1 GLM53_PROF_EVERY=1 GLM53_PREWARM_EXPERTS=1 GLM53_EXPERT_GB=175
