@@ -110,9 +110,10 @@ Completed checkpoints:
 - `5b4824ab` composes the retained shared and resident-routed device D-row contributions with `coli_cuda_pipe_add` and verifies the combined row against the host `out` state before nonresident experts are processed. CPU/CUDA-linked GLM builds pass; GPU output remains qualification-only.
 - `6484e9e4` returns a complete device FFN branch only when **all selected routed experts are resident**, then threads that D-row into FFN-site device mHC post using a non-aliasing output scratch slot. CPU/CUDA-linked GLM builds pass; any nonresident selection returns `NULL` and stays on the unchanged host path.
 - `f4b59e62` adds rolling S=1 hot-tier coverage telemetry: sparse decode-site sets entering device-row qualification versus sets where every selected routed expert is resident. CPU/CUDA-linked GLM builds pass; the next safe deployment will report `resident_coverage ... pct=...` and decide whether to grow/reorder residency or prioritize streamed-device accumulation.
+- `7ec30f01` preserves a successfully verified device residual across the **layer boundary**, allowing the next layer's attention mHC-pre to consume it directly. Any host-only site or GPU-post failure clears residency immediately, preventing stale scratch reuse. CPU/CUDA-linked GLM builds pass.
 
 Work:
-- deploy verification mode at the next safe restart and measure real router/chain drift, VRAM high-water, and all-resident decode coverage;
+- deploy verification mode at the next safe restart and measure real router/chain drift, VRAM high-water, all-resident decode coverage, and cross-layer `resident_in=1` continuity;
 - after real-run parity, make the shared expert and device-row resident routed-expert contributions authoritative and avoid their host activation staging;
 - preserve residual stream across layer boundaries;
 - replace broad synchronizations with dependency-local synchronization.
