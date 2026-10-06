@@ -90,9 +90,12 @@ struct AnsArenaChunk { uint8_t *p; size_t used,cap; };
 #endif
 typedef struct {
     const float *ape_host;              /* stable per-layer cache identity */
+    const float *keys_host,*gates_host; /* host history identity; reset on realloc */
     float *pooled_dev;                  /* completed compressed index pools */
-    size_t pooled_cap;
+    unsigned char *complete_dev;
+    size_t pooled_cap, complete_cap;
     int pooled_rows;
+    int first, dim, pool, sequence;
 } SparseIndexCache;
 
 typedef struct {
@@ -195,6 +198,30 @@ static int select_ctx(DeviceContext *ctx) {
     if (!cuda_ok(cudaSetDevice(ctx->device), "select device")) return 0;
     g_current_device = ctx->device;
     return 1;
+}
+
+static SparseIndexCache *sparse_index_cache_for(DeviceContext *ctx,const float *ape,
+        const float *keys,const float *gates,int first,int dim,int pool){
+    if(!ctx||!ape)return nullptr;
+    if(!ctx->sparse_index_cache) ctx->sparse_index_cache=new std::vector<SparseIndexCache>();
+    for(auto &cache:*ctx->sparse_index_cache){
+        if(cache.ape_host!=ape)continue;
+        if(cache.keys_host!=keys||cache.gates_host!=gates||cache.first!=first||
+           cache.dim!=dim||cache.pool!=pool){
+            if(cache.pooled_dev)cudaFree(cache.pooled_dev);
+            if(cache.complete_dev)cudaFree(cache.complete_dev);
+            cache.pooled_dev=nullptr;cache.complete_dev=nullptr;
+            cache.pooled_cap=cache.complete_cap=0;cache.pooled_rows=0;cache.sequence=0;
+            cache.keys_host=keys;cache.gates_host=gates;
+            cache.first=first;cache.dim=dim;cache.pool=pool;
+        }
+        return &cache;
+    }
+    SparseIndexCache cache{};
+    cache.ape_host=ape;cache.keys_host=keys;cache.gates_host=gates;
+    cache.first=first;cache.dim=dim;cache.pool=pool;
+    ctx->sparse_index_cache->push_back(cache);
+    return &ctx->sparse_index_cache->back();
 }
 
 /* fmt=6 (E8/IQ3) geometry, mirroring quant.h. A super-block packs 256 weights
@@ -1413,7 +1440,10 @@ extern "C" void coli_cuda_shutdown(void) {
         if (ctx->host_kv) cudaFreeHost(ctx->host_kv);
         if (ctx->host_sparse) cudaFreeHost(ctx->host_sparse);
         if (ctx->sparse_index_cache) {
-            for (auto &cache : *ctx->sparse_index_cache) if (cache.pooled_dev) cudaFree(cache.pooled_dev);
+            for (auto &cache : *ctx->sparse_index_cache) {
+                if (cache.pooled_dev) cudaFree(cache.pooled_dev);
+                if (cache.complete_dev) cudaFree(cache.complete_dev);
+            }
             delete ctx->sparse_index_cache;
         }
         if (ctx->sparse_upload_event_ok) cudaEventDestroy(ctx->sparse_upload_done);
@@ -3390,38 +3420,79 @@ extern "C" int coli_cuda_sparse_index_select_decode(int device,int *out_host,
        sequence<1||heads<1||dim<1||pool<1||topk<pool||topk%pool||
        q<0||q>=sequence||!select_ctx(dc))return 0;
     int first=0;while(first<sequence&&!valid[first])first++;
-    int pools=(sequence+pool-1)/pool,width=topk+(with_tail?pool-1:0);
-    size_t qb=(size_t)heads*dim*sizeof(float),kb=(size_t)sequence*dim*sizeof(float),
-           hb=(size_t)heads*sizeof(float),ab=(size_t)pool*dim*sizeof(float),
-           vb=(size_t)sequence*sizeof(unsigned char),pb=(size_t)pools*dim*sizeof(float),
-           sb=(size_t)pools*sizeof(float),cb=(size_t)pools*sizeof(unsigned char),
+    int pools=(sequence-first)/pool,width=topk+(with_tail?pool-1:0);
+    size_t qb=(size_t)heads*dim*sizeof(float),hb=(size_t)heads*sizeof(float),
+           ab=(size_t)pool*dim*sizeof(float),vb=(size_t)sequence*sizeof(unsigned char),
+           sb=(size_t)(pools?pools:1)*sizeof(float),
+           cb=(size_t)(pools?pools:1)*sizeof(unsigned char),
            ob=(size_t)width*sizeof(int);
     float *dq=coli_cuda_pipe_scratch(device,22,qb);
-    float *dk=coli_cuda_pipe_scratch(device,23,kb);
-    float *dg=coli_cuda_pipe_scratch(device,24,kb);
     float *dh=coli_cuda_pipe_scratch(device,25,hb);
-    float *da=coli_cuda_pipe_scratch(device,26,ab);
-    if(!dq||!dk||!dg||!dh||!da||
-       !reserve(&dc->aq,&dc->aq_cap,pb)||!reserve(&dc->al,&dc->al_cap,sb)||
-       !reserve_bytes((void**)&dc->ar,&dc->ar_cap,2*cb)||
+    if(!dq||!dh||!reserve(&dc->al,&dc->al_cap,sb)||
+       !reserve_bytes((void**)&dc->ar,&dc->ar_cap,cb)||
        !reserve_bytes((void**)&dc->asel,&dc->asel_cap,ob+vb))return 0;
-    unsigned char *complete=(unsigned char*)dc->ar;
-    unsigned char *taken=complete+pools;
+    unsigned char *taken=(unsigned char*)dc->ar;
     unsigned char *dv=(unsigned char*)dc->asel+ob;
+    SparseIndexCache *cache=sparse_index_cache_for(dc,ape,keys,gates,first,dim,pool);
+    if(!cache)return 0;
+    if(sequence<cache->sequence||cache->pooled_rows>pools)cache->pooled_rows=0;
+
+    size_t pooled_bytes=(size_t)(pools?pools:1)*dim*sizeof(float);
+    size_t complete_bytes=(size_t)(pools?pools:1);
+    int cache_grew=0;
+    if(cache->pooled_cap<pooled_bytes){
+        const size_t quantum=8ull<<20;
+        size_t target=(pooled_bytes+quantum-1)/quantum*quantum;
+        if(cache->pooled_dev)cudaFree(cache->pooled_dev);
+        cache->pooled_dev=nullptr;cache->pooled_cap=0;
+        if(!cuda_ok(cudaMalloc(&cache->pooled_dev,target),"sparse pooled cache allocation"))return 0;
+        cache->pooled_cap=target;cache_grew=1;
+    }
+    if(cache->complete_cap<complete_bytes){
+        const size_t quantum=64ull<<10;
+        size_t target=(complete_bytes+quantum-1)/quantum*quantum;
+        if(cache->complete_dev)cudaFree(cache->complete_dev);
+        cache->complete_dev=nullptr;cache->complete_cap=0;
+        if(!cuda_ok(cudaMalloc(&cache->complete_dev,target),"sparse complete cache allocation"))return 0;
+        cache->complete_cap=target;cache_grew=1;
+    }
+    if(cache_grew)cache->pooled_rows=0;
+
     if(!cuda_ok(cudaMemcpyAsync(dq,query,qb,cudaMemcpyHostToDevice,dc->stream),"sparse index query upload")||
-       !cuda_ok(cudaMemcpyAsync(dk,keys,kb,cudaMemcpyHostToDevice,dc->stream),"sparse index key upload")||
-       !cuda_ok(cudaMemcpyAsync(dg,gates,kb,cudaMemcpyHostToDevice,dc->stream),"sparse index gate upload")||
        !cuda_ok(cudaMemcpyAsync(dh,head_w,hb,cudaMemcpyHostToDevice,dc->stream),"sparse index head weight upload")||
-       !cuda_ok(cudaMemcpyAsync(da,ape,ab,cudaMemcpyHostToDevice,dc->stream),"sparse index ape upload")||
        !cuda_ok(cudaMemcpyAsync(dv,valid,vb,cudaMemcpyHostToDevice,dc->stream),"sparse index valid upload"))
         return 0;
-    glm_sparse_pool_kernel<<<pools,128,0,dc->stream>>>(dc->aq,complete,
-        dk,dg,da,dv,sequence,dim,pool,first,pools);
-    glm_sparse_score_kernel<<<(pools+127)/128,128,0,dc->stream>>>(dc->al,dq,dc->aq,dh,
-        complete,q,first,pools,pool,heads,dim);
-    if(!cuda_ok(cudaMemsetAsync(taken,0,cb,dc->stream),"GLM sparse index taken clear"))return 0;
-    glm_sparse_select_kernel<<<1,256,0,dc->stream>>>(dc->asel,dc->al,taken,dv,sequence,q,first,pools,
-        pool,topk,with_tail);
+
+    int new_pools=pools-cache->pooled_rows;
+    if(new_pools>0){
+        int raw_start=first+cache->pooled_rows*pool,raw_rows=new_pools*pool;
+        size_t kb=(size_t)raw_rows*dim*sizeof(float);
+        float *dk=coli_cuda_pipe_scratch(device,23,kb);
+        float *dg=coli_cuda_pipe_scratch(device,24,kb);
+        float *da=coli_cuda_pipe_scratch(device,26,ab);
+        if(!dk||!dg||!da||
+           !cuda_ok(cudaMemcpyAsync(dk,keys+(size_t)raw_start*dim,kb,cudaMemcpyHostToDevice,dc->stream),
+                    "sparse index key append")||
+           !cuda_ok(cudaMemcpyAsync(dg,gates+(size_t)raw_start*dim,kb,cudaMemcpyHostToDevice,dc->stream),
+                    "sparse index gate append")||
+           !cuda_ok(cudaMemcpyAsync(da,ape,ab,cudaMemcpyHostToDevice,dc->stream),
+                    "sparse index ape upload"))return 0;
+        glm_sparse_pool_kernel<<<new_pools,128,0,dc->stream>>>(
+            cache->pooled_dev+(size_t)cache->pooled_rows*dim,
+            cache->complete_dev+cache->pooled_rows,dk,dg,da,dv+raw_start,
+            raw_rows,dim,pool,0,new_pools);
+        cache->pooled_rows=pools;
+    }
+    cache->sequence=sequence;
+
+    if(pools>0){
+        glm_sparse_score_kernel<<<(pools+127)/128,128,0,dc->stream>>>(
+            dc->al,dq,cache->pooled_dev,dh,cache->complete_dev,q,first,pools,pool,heads,dim);
+        if(!cuda_ok(cudaMemsetAsync(taken,0,(size_t)pools,dc->stream),
+                    "GLM sparse index taken clear"))return 0;
+    }
+    glm_sparse_select_kernel<<<1,256,0,dc->stream>>>(
+        dc->asel,dc->al,taken,dv,sequence,q,first,pools,pool,topk,with_tail);
     if(!cuda_ok(cudaGetLastError(),"GLM sparse index launch")||
        !cuda_ok(cudaMemcpyAsync(out_host,dc->asel,ob,cudaMemcpyDeviceToHost,dc->stream),
                 "GLM sparse index download")||
