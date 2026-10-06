@@ -311,14 +311,14 @@ Use the full model to answer:
 
 ## Current execution cursor
 
-ACTIVE: U10.2.
+ACTIVE: U10.3.
 
 Exact next actions:
-1. Preserve the active full-model comparison lane; do not rebuild, replace DLLs, or launch CHAIN=1 while any glm53 process from that lane is active.
-2. Once the GPU is idle, launch only u10-chain1-fb61f73-global-g8 from c/scripts/wrx80_glm53_u10_chain1_ab.json.
-3. Preserve decode tok/s, cumulative attention/FFN/router/indexer, VRAM, GPU utilization/power, CPU process time, and any fallback/error markers.
-4. Compare against frozen ordinary GPU-attention global baseline G1 = 1.299 tok/s, with recent global controls treated as variance context rather than replacements.
-5. Only after the global CHAIN=1 result is preserved should the fair arm be enabled.
+1. Do not enable the fair CHAIN=1 arm yet.
+2. Add/run an exact-source CHAIN=0 global-residency control from the same detached fb61f73 worktree, with the same current usage history and benchmark settings as U10.2.
+3. Compare CHAIN=1 vs that same-source CHAIN=0 control on decode tok/s, attention/FFN/router/indexer totals, VRAM, GPU-utilization tail, and CPU-time tail.
+4. If CHAIN=1 remains materially slower, attribute the delta to chain plumbing and inspect the low 12.2% chain-residency rate before changing residency policy.
+5. Only consider the fair CHAIN=1 arm after the CHAIN=1-vs-CHAIN=0 attribution is clean.
 
 Independent work allowed while U00/U01 inference is active:
 - offline U40 residency simulation improvements;
@@ -406,3 +406,19 @@ U01 is cleared. ACTIVE next unit: U10.1, prepare the first real CHAIN=1 short A/
 - Queue process PID: `23868`.
 - The queue waits for PID 500 to exit, then waits for no remaining `glm53` process, then launches only the manifest `c/scripts/wrx80_glm53_u10_chain1_ab.json` where the global arm is enabled and the fair arm is disabled.
 - Do not launch another U10 marshal while PID 23868 is active. Preserve the full-model lane and the queued global CHAIN=1 run.
+
+
+### U10.2 global CHAIN=1 short run - COMPLETE
+
+- Exact-source run: u10-chain1-fb61f73-global-g8 from detached worktree fb61f73.
+- Serialization was clean: full-model comparison marshal exited at 16:05:36.455; U10.2 launched immediately afterward with no overlapping glm53 process.
+- Marshal result: ok=true, failures=[], elapsed 391.635 s.
+- Decode: 8 tokens in 6.8 s = 1.170 tok/s, about 9.9% below frozen G1 1.299 tok/s.
+- Forward 13 cumulative: attention 124.041 s, indexer 3.090 s (proj 1.985 / select 1.105), FFN 98.597 s, router 19.071 s, head 0.998 s.
+- MoE cumulative: shared 3.501 s, resident_gpu 2.800 s, streamed_gpu 0.329 s, cpu 71.367 s.
+- Indexer authoritative: 8/8 pass, fallback=0; no CUDA error or engine_error markers.
+- VRAM peak used 22,795.5 MiB; minimum free 1,768 MiB.
+- Complete resident expert sets: 0/336 = 0.0%.
+- CHAIN=1 resident input coverage: 88/720 pre-sites = 12.2%.
+- Telemetry tail 8 s: GPU utilization avg 13.5% / max 18%, power avg 71.5 W, CPU delta 35.31 s over ~7.9 s = ~4.45 CPU cores.
+- Interpretation is not yet final because frozen G1 is from an earlier run state. Next attribution gate is a same-source/current-history CHAIN=0 control before enabling fair residency.

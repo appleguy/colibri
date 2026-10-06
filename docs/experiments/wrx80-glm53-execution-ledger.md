@@ -632,3 +632,7 @@ The exact-source CHAIN=1 short A/B manifest is committed as 50c6f60. Global resi
 ### U10.2 serialized behind full-model comparison
 
 The global CHAIN=1 short run is queued safely behind full-model comparison marshal PID 500. Queue PID 23868 waits for the entire full-model marshal to exit, then for the inference lane to become empty, before launching the exact-source U10 manifest. This avoids racing between full-model arms and CHAIN=1.
+
+### U10.2 global CHAIN=1 result
+
+Exact-source global CHAIN=1 completed cleanly at 1.170 tok/s (8 tokens / 6.8 s), with authoritative indexer 8/8 and fallback=0. Cumulative forward-13 attention/FFN/router/indexer were 124.041 / 98.597 / 19.071 / 3.090 s. Peak VRAM was 22,795.5 MiB with 1,768 MiB free. CHAIN resident-input coverage was only 12.2% (88/720 pre-sites), and complete resident expert sets were 0/336. The result is ~9.9% below frozen G1, but the next attribution step is a same-source/current-history CHAIN=0 control before enabling fair residency.
