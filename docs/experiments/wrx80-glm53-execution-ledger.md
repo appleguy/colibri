@@ -108,9 +108,10 @@ Completed checkpoints:
 - `2812d439` refactors the shared-expert helper to **retain its D-row contribution on-device** and moves the verification download to the caller. Numerics are unchanged, CPU/CUDA-linked GLM builds pass, and the device row is now composable with routed-expert contributions before mHC post.
 - `9959c261` mirrors that refactor for the S=1 resident routed-expert helper: it now returns its device accumulator, while the caller performs the verification download. CPU/CUDA-linked GLM builds pass; CPU output remains authoritative.
 - `5b4824ab` composes the retained shared and resident-routed device D-row contributions with `coli_cuda_pipe_add` and verifies the combined row against the host `out` state before nonresident experts are processed. CPU/CUDA-linked GLM builds pass; GPU output remains qualification-only.
+- `6484e9e4` returns a complete device FFN branch only when **all selected routed experts are resident**, then threads that D-row into FFN-site device mHC post using a non-aliasing output scratch slot. CPU/CUDA-linked GLM builds pass; any nonresident selection returns `NULL` and stays on the unchanged host path.
 
 Work:
-- thread the combined resident device D-row through the FFN caller and into device mHC post under verification mode;
+- quantify how often S=1 decode has an all-resident selected set, then decide whether to enlarge/reorder the hot expert tier or add device accumulation for nonresident streamed experts;
 - after real-run parity, make the shared expert and device-row resident routed-expert contributions authoritative and avoid their host activation staging;
 - preserve residual stream across layer boundaries;
 - replace broad synchronizations with dependency-local synchronization.
