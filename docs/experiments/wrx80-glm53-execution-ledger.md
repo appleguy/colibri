@@ -623,3 +623,7 @@ The temporary one-run marshal marked `ok=false` only because it required the non
 Evidence summary: `E:\\z-results\\glm53-native-2026-10-06\\u01-chain2-review.json`.
 
 U01 is cleared. ACTIVE next unit: U10.1, prepare the first real CHAIN=1 short A/B against ordinary GPU attention. The full GLM-5.3 comparison lane may run first because it is already waiting on the U01 approval sentinel; do not rebuild/replace binaries while that lane is active.
+
+### U10.1 preparation checkpoint
+
+The exact-source CHAIN=1 short A/B manifest is committed as 50c6f60. Global residency is enabled first; fair residency remains disabled until the global result is preserved. The active full-model comparison process takes precedence, so U10.2 launch is blocked until glm53 releases the GPU.

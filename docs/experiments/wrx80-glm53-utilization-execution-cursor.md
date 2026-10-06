@@ -311,14 +311,14 @@ Use the full model to answer:
 
 ## Current execution cursor
 
-ACTIVE: U10.1.
+ACTIVE: U10.2.
 
 Exact next actions:
-1. If the full GLM-5.3 comparison marshal is active, do not rebuild or replace native binaries; preserve that benchmark lane.
-2. Prepare a clean exact-source CHAIN=1 short A/B manifest using source commit `fb61f73`, with ordinary GPU attention / authoritative router+indexer and no unfinished sparse-profiler code.
-3. Run global-residency CHAIN=1 first against the frozen ordinary GPU-attention baseline; add the fair-residency arm only after the global result is preserved.
-4. Measure decode tok/s, cumulative attention/FFN/router/indexer, VRAM, host residual downloads, GPU utilization/power, and CPU process time.
-5. If CHAIN=1 is correct and non-regressive, advance to U11 residual-readback removal. Otherwise isolate the regression before changing residency or sparse-attention code.
+1. Preserve the active full-model comparison lane; do not rebuild, replace DLLs, or launch CHAIN=1 while any glm53 process from that lane is active.
+2. Once the GPU is idle, launch only u10-chain1-fb61f73-global-g8 from c/scripts/wrx80_glm53_u10_chain1_ab.json.
+3. Preserve decode tok/s, cumulative attention/FFN/router/indexer, VRAM, GPU utilization/power, CPU process time, and any fallback/error markers.
+4. Compare against frozen ordinary GPU-attention global baseline G1 = 1.299 tok/s, with recent global controls treated as variance context rather than replacements.
+5. Only after the global CHAIN=1 result is preserved should the fair arm be enabled.
 
 Independent work allowed while U00/U01 inference is active:
 - offline U40 residency simulation improvements;
@@ -389,3 +389,11 @@ The temporary one-run marshal marked `ok=false` only because it required the non
 Evidence summary: `E:\\z-results\\glm53-native-2026-10-06\\u01-chain2-review.json`.
 
 U01 is cleared. ACTIVE next unit: U10.1, prepare the first real CHAIN=1 short A/B against ordinary GPU attention. The full GLM-5.3 comparison lane may run first because it is already waiting on the U01 approval sentinel; do not rebuild/replace binaries while that lane is active.
+
+
+### U10.1 CHAIN=1 A/B preparation - COMPLETE
+
+- Exact source/binary provenance remains detached worktree E:\\z-src\\colibri-u01-chain2 at fb61f73.
+- c/scripts/wrx80_glm53_u10_chain1_ab.json defines global CHAIN=1 enabled and fair CHAIN=1 disabled, with CHAIN=1 / ATTN=1 / ROUTER=1 / INDEXER=1 and sparse profiling disabled.
+- Manifest commit: 50c6f60 (glm53-add-u10-chain1-ab-manifest).
+- A full-model comparison glm53 process became active before U10.2 launch. Preserve it and defer CHAIN=1 execution until the GPU is free.
