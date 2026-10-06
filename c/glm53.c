@@ -2778,14 +2778,14 @@ static int cuda_moe_block(GModel *m, const LCache *cache, const int *slot_of,
  *
  * Fare l'unione paga due volte: le letture vanno insieme, e un esperto che
  * serve a piu' token del blocco si legge una volta sola. */
-static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
-                      const float *x_dev, int tokens, float *out) {
+static float *ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
+                        const float *x_dev, int tokens, float *out) {
     const Cfg *c = &m->c;
     const int wide = c->dense_inter > c->moe_inter ? c->dense_inter : c->moe_inter;
 
     if (index < c->first_dense) {                 /* layer denso: nessun router */
         mlp3_batch(out, x, tokens, &l->dg, &l->du, &l->dd, c->swiglu_limit);
-        return;
+        return NULL;
     }
 
     const int topk = c->topk;
@@ -2930,7 +2930,7 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
                 for (int d = 0; d < c->hidden; d++) dst[d] += scale * tmp[d];
         }
         free(tmp); free(su); free(sg); free(weight); free(chosen);
-        return;
+        return NULL;
     }
 
     /* unione dei distinti, nell'ordine in cui compaiono */
@@ -2944,6 +2944,7 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
     }
 
 #ifdef COLI_CUDA
+    float *complete_dev = NULL;
     /* Persistent VRAM residents are computed first into an atomic scratch
      * accumulator. Only after the whole resident subset succeeds do we remove
      * those ids from the ordinary RAM/disk union, so backend failure preserves
@@ -3012,6 +3013,8 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
             for (int i = 0; i < n_union; i++)
                 if (!handled[i]) union_ids[keep++] = union_ids[i];
             n_union = keep;
+            if (n_union == 0 && shared_out_dev && resident_out_dev)
+                complete_dev = shared_out_dev;
         }
         free(handled);
         free(resident_dev);
@@ -3179,6 +3182,11 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
     }
     free(to_read); free(slot_of); free(union_ids);
     free(weight); free(chosen);
+#ifdef COLI_CUDA
+    return complete_dev;
+#else
+    return NULL;
+#endif
 }
 
 /* ---------- caricamento ---------- */
@@ -3705,9 +3713,16 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                     (chain_mode == 2 && chain_pre_ok) ? chain_pre_norm_verify : normed;
                 const float *ffn_input_dev =
                     (chain_mode == 2 && chain_pre_ok) ? chain_normed_dev : NULL;
-                ffn_layer(m, l, i, ffn_input, ffn_input_dev, n, branch);
+                float *ffn_branch_dev =
+                    ffn_layer(m, l, i, ffn_input, ffn_input_dev, n, branch);
+                if (ffn_branch_dev && chain_pre_ok) {
+                    chain_branch_dev = ffn_branch_dev;
+                    chain_next_dev = coli_cuda_pipe_scratch(
+                        g_cuda_device, 10, (size_t)n * H * D * sizeof(float));
+                    chain_branch_ok = chain_next_dev != NULL;
+                }
 #else
-                ffn_layer(m, l, i, normed, NULL, n, branch);
+                (void)ffn_layer(m, l, i, normed, NULL, n, branch);
 #endif
             }
             /* Un solo paio di letture del clock per sito, il ramo dice a chi
