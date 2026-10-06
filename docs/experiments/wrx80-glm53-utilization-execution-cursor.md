@@ -332,3 +332,11 @@ Independent work allowed while U00/U01 inference is active:
 ## Wake prompt
 
 Resume WRX80 native-Windows GLM-5.3 optimization from `docs/experiments/wrx80-glm53-utilization-execution-cursor.md`. Inspect HEAD/origin/status, active inference/marshal/validator state and GPU use first. Preserve useful runs and treat dirty `c/glm53.c` and `c/backend_cuda.cu` as owned work. Advance the ACTIVE unit with the smallest validated change, checkpoint source and docs separately, push frequently, then update the cursor before moving on.
+
+
+### U00 progress checkpoint — 2026-10-06 14:27 local
+
+- The original validator exited after `make clean`; no CPU/CUDA build logs were produced. Treat this as a wrapper/build-environment failure, not a model failure.
+- Manual isolated-worktree CPU build using absolute w64devkit `make.exe` passed for the staged conservative CHAIN=1 source.
+- Evidence: `E:\\z-results\\glm53-native-2026-10-06\\chain1-validation\\cpu-build-manual.log` ends with `CPU_BUILD_PASS`.
+- ACTIVE next action: run CUDA DLL build in the isolated worktree with explicit CUDA/MSVC environment, then CUDA-linked GLM build, RTX backend numerical suite, and loader fixture. Do not commit `c/glm53.c` until all remaining gates pass.

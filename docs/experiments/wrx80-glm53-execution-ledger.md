@@ -579,3 +579,8 @@ The first run is gated on `E:\\z-results\\glm53-native-2026-10-06\\chain2-requal
 ### Utilization phase cursor
 
 The canonical next-work cursor is now `docs/experiments/wrx80-glm53-utilization-execution-cursor.md`. ACTIVE unit: U00, repair/complete isolated validation of the conservative CHAIN=1 step-1 promotion before CHAIN=2 requalification.
+
+
+### U00 validation progress — 2026-10-06 14:27 local
+
+The staged conservative CHAIN=1 source passed the isolated native CPU build. The earlier validator failure occurred in the wrapper/build environment after `make clean`, before any source compile failure was observed. Next gate is explicit native CUDA DLL + CUDA-linked GLM validation in the isolated worktree.
