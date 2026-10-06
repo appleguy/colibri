@@ -341,6 +341,7 @@ See `docs/glm53-flash.md`.
 | `GLM53_MAX_IMAGE_TOKENS` | checkpoint's (8000) | Ceiling on tokens per image. Each covers 28×28 pixels, so 256 keeps ordinary text legible and 64 keeps shapes and colours. The image is shrunk, not cropped. Lower it: 8000 is 2691 tokens for a 1080p photo, i.e. a prefill nobody will sit through. |
 | `GLM53_VERBOSE` | unset | Print the parsed geometry, the expert budget and the per-token cache cost to stderr. |
 | `GLM53_PROF_EVERY` | `0` | With `PROF` enabled, emit cumulative GLM-5.3 attention/FFN/disk/head timings to stderr every N completed forward spans. `0` disables rolling reports; final per-request `PROF` framing is unchanged. |
+| `GLM53_PREWARM_EXPERTS` | `0` | GLM-5.3 streaming mode: fill the already-sized host expert cache at startup, ranked by persisted routing history. When host capacity is smaller than the model and a CUDA resident tier exists, prioritize non-VRAM experts so RAM complements VRAM. Startup I/O is excluded from runtime miss/byte counters. |
 | `GLM53_DUMP_INDEX` | unset | Print the rows the sparse indexer selected. The first place to look when the engine diverges only at certain lengths. |
 | `COLI_VULKAN` | `0` | Route resident matrices through the shared Vulkan backend. Needs a `VK=1` build and compiled shaders (`COLI_VK_SHADERS`). Routed experts use the CPU path under Vulkan; grouped routed-expert offload currently exists in the CUDA backend. |
 
