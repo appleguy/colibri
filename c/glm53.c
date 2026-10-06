@@ -3619,7 +3619,7 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                 const size_t post_b = (size_t)n * H * sizeof(float);
                 const size_t comb_b = (size_t)n * H * H * sizeof(float);
                 const size_t collapsed_b = (size_t)n * D * sizeof(float);
-                const int pre_uses_resident = site && resident_streams_valid;
+                const int pre_uses_resident = resident_streams_valid;
                 chain_residual_dev = pre_uses_resident ? resident_streams_dev :
                     coli_cuda_pipe_scratch(g_cuda_device, 0, residual_b);
                 float *pre_collapsed_dev = coli_cuda_pipe_scratch(g_cuda_device, 1, collapsed_b);
@@ -3760,6 +3760,8 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                 if (gpu_post_ok) {
                     resident_streams_dev = chain_next_dev;
                     resident_streams_valid = 1;
+                } else {
+                    resident_streams_valid = 0;
                 }
                 if (gpu_post_ok && coli_cuda_pipe_download(
                         g_cuda_device, chain_next_dev, chain_verify,
@@ -3782,15 +3784,16 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                 }
             }
 #endif
-            if (!post_done)
+            if (!post_done) {
                 for (int t = 0; t < n; t++)
                     coli_hc_post(next + (size_t)t * H * D, branch + (size_t)t * D,
                                  streams + (size_t)t * H * D, post + (size_t)t * H,
                                  comb + (size_t)t * H * H, H, D);
-            float *swap = streams; streams = next; next = swap;
 #ifdef COLI_CUDA
-            if (site) resident_streams_valid = 0;
+                resident_streams_valid = 0;
 #endif
+            }
+            float *swap = streams; streams = next; next = swap;
         }
     }
     free(chain_pre_comb_verify);
