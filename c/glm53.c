@@ -2522,6 +2522,44 @@ static void cuda_resident_expert_init(GModel *m) {
     }
     free(cand);
 
+    if (m->gpu_expert_count && (getenv("PROF") || getenv("GLM53_VERBOSE") || getenv("COLI_CUDA_PROFILE"))) {
+        uint64_t total_heat = 0, resident_heat = 0;
+        double min_layer_pct = 101.0, max_layer_pct = -1.0;
+        int min_layer = -1, max_layer = -1;
+        int min_layer_experts = m->c.n_experts + 1, max_layer_experts = -1;
+        for (int layer = from; layer < m->layer_end; layer++) {
+            uint32_t *counts = rt_counts(layer);
+            if (!counts) continue;
+            uint64_t layer_total = 0, layer_resident = 0;
+            int layer_experts = 0;
+            for (int eid = 0; eid < m->c.n_experts; eid++) {
+                layer_total += counts[eid];
+                GpuExpert *ge = &m->gpu_expert[(size_t)layer * m->c.n_experts + eid];
+                if (ge->resident) {
+                    layer_resident += counts[eid];
+                    layer_experts++;
+                }
+            }
+            total_heat += layer_total;
+            resident_heat += layer_resident;
+            if (layer_total) {
+                const double pct = 100.0 * (double)layer_resident / (double)layer_total;
+                if (pct < min_layer_pct) { min_layer_pct = pct; min_layer = layer; }
+                if (pct > max_layer_pct) { max_layer_pct = pct; max_layer = layer; }
+            }
+            if (layer_experts < min_layer_experts) min_layer_experts = layer_experts;
+            if (layer_experts > max_layer_experts) max_layer_experts = layer_experts;
+        }
+        fprintf(stderr,
+                "[CUDA] GLM53 resident history coverage: total=%.1f%% min_layer=%d %.1f%% "
+                "max_layer=%d %.1f%% experts/layer=%d..%d\n",
+                total_heat ? 100.0 * (double)resident_heat / (double)total_heat : 0.0,
+                min_layer, min_layer_pct <= 100.0 ? min_layer_pct : 0.0,
+                max_layer, max_layer_pct >= 0.0 ? max_layer_pct : 0.0,
+                min_layer_experts <= m->c.n_experts ? min_layer_experts : 0,
+                max_layer_experts >= 0 ? max_layer_experts : 0);
+    }
+
     if (m->gpu_expert_count) {
         const size_t rows_cap = (size_t)GLM53_MOE_BATCH_ROWS * (size_t)m->c.topk;
         const size_t tokens_cap = GLM53_MOE_BATCH_ROWS;
