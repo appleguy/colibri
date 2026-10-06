@@ -1554,15 +1554,15 @@ static int cuda_router_try(GModel *m, GLayer *l, const float *row,
         return 0;
     return keff == topk;
 }
-static int cuda_shared_mlp_verify_dev(GModel *m, GLayer *l,
-        const float *x_dev, float *out_host) {
-    if (!m || !l || !x_dev || !out_host || !g_cuda_ready) return 0;
+static float *cuda_shared_mlp_dev(GModel *m, GLayer *l,
+        const float *x_dev) {
+    if (!m || !l || !x_dev || !g_cuda_ready) return NULL;
     if (!cuda_mat_ensure(&l->rg) || !cuda_mat_ensure(&l->ru) ||
-        !cuda_mat_ensure(&l->rd)) return 0;
+        !cuda_mat_ensure(&l->rd)) return NULL;
     const int I = l->rg.rows, D = m->c.hidden;
     if (I < 1 || l->ru.rows != I || l->rg.columns != D ||
         l->ru.columns != D || l->rd.columns != I || l->rd.rows != D)
-        return 0;
+        return NULL;
     float *gate_dev = coli_cuda_pipe_scratch(
         g_cuda_device, 19, (size_t)I * sizeof(float));
     float *up_dev = coli_cuda_pipe_scratch(
@@ -1574,11 +1574,9 @@ static int cuda_shared_mlp_verify_dev(GModel *m, GLayer *l,
         !coli_cuda_pipe_gemm((ColiCudaTensor *)l->ru.cuda, up_dev, x_dev, 1) ||
         !coli_cuda_pipe_swiglu_clamped(g_cuda_device, gate_dev, up_dev,
                                        (size_t)I, m->c.swiglu_limit) ||
-        !coli_cuda_pipe_gemm((ColiCudaTensor *)l->rd.cuda, out_dev, gate_dev, 1) ||
-        !coli_cuda_pipe_download(g_cuda_device, out_dev, out_host,
-                                 (size_t)D * sizeof(float)))
-        return 0;
-    return 1;
+        !coli_cuda_pipe_gemm((ColiCudaTensor *)l->rd.cuda, out_dev, gate_dev, 1))
+        return NULL;
+    return out_dev;
 }
 #endif
 
@@ -2893,7 +2891,10 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
     if (tokens == 1 && x_dev && cuda_chain_mode() == 2) {
         float *shared_dev = malloc((size_t)c->hidden * sizeof(float));
         if (!shared_dev) { fprintf(stderr, "OOM allocating shared expert verification row\n"); exit(1); }
-        if (cuda_shared_moe_verify_dev(m, (GLayer *)l, x_dev, shared_dev)) {
+        float *shared_out_dev = cuda_shared_mlp_dev(m, (GLayer *)l, x_dev);
+        if (shared_out_dev &&
+            coli_cuda_pipe_download(g_cuda_device, shared_out_dev, shared_dev,
+                                    (size_t)c->hidden * sizeof(float))) {
             float max_abs = 0.0f, max_rel = 0.0f;
             for (int q = 0; q < c->hidden; q++) {
                 const float da = fabsf(shared_dev[q] - out[q]);
