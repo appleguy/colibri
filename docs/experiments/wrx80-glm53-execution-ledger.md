@@ -99,10 +99,11 @@ Completed checkpoints:
 - `ddac0bb4` wires an opt-in `COLI_CUDA_GLM53_CHAIN=2` verification bridge through **sparse MLA -> resident `o_proj` dev-out -> device mHC post**. It uploads the current residual/post/comb, keeps the expensive branch on device, downloads only the final residual bank for comparison, and keeps the existing CPU branch/post authoritative. CPU and CUDA-linked GLM builds plus CUDA backend parity pass; runtime drift measurement waits for the next safe service restart.
 - `2ffb20f6` adds batch-capable `coli_cuda_pipe_hc_pre`: device residual -> fidelity-first inverse-RMS / `hc_fn` mix projection / sigmoid pre-post coefficients / Sinkhorn -> device collapsed/post/comb. Scalar reduction order matches the CPU reference while independent tokens/rows/columns run in parallel. Two-token CUDA numerical parity passes at the existing `1e-4` gate; CPU and CUDA-linked GLM builds pass; Linux loader/header parity and native-Windows ABI (`56 mandatory + 9 optional`) pass.
 - `54887458` wires a verification-only real-geometry **mHC pre -> GPU RMSNorm** caller path under `COLI_CUDA_GLM53_CHAIN=2`. It recomputes attention-site pre/post/comb and normalized input from the real residual bank on-device, downloads only verification outputs, and reports norm/post/comb drift while the CPU path remains authoritative. CPU and CUDA-linked GLM builds plus the CUDA backend suite pass; runtime drift measurement waits for the next safe restart.
+- `2c660d2b` keeps the attention-site device residual resident across the site-loop boundary and feeds that exact `H×D` pointer directly into FFN-site device mHC-pre under verification mode. Per-layer mHC/norm weights are persistently resident, so the second site skips both the residual re-upload and repeated ~1.5 MiB `hc_fn` uploads. CPU and CUDA-linked GLM builds plus the CUDA backend suite pass.
 
 Work:
-- preserve the attention `hc_post` residual on device into the following FFN-site mHC pre instead of downloading/re-uploading `H*D`;
-- download only the normalized `D` row while FFN remains host-side, then move resident MoE/router consumption to the device row in the next step;
+- make the device-normalized `D` row the explicit FFN input boundary; while FFN remains host-side, download only that row instead of the residual bank;
+- move resident router/MoE consumption onto that device row so the normalized activation no longer returns to CPU;
 - preserve residual stream across layer boundaries;
 - replace broad synchronizations with dependency-local synchronization.
 
