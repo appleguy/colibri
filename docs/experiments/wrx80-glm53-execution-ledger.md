@@ -574,3 +574,8 @@ The comparison matrix is `c/scripts/wrx80_glm53_full_comparison.json`. It holds 
 - disabled ~32k-character medium-context full-model benchmark, enabled only after the short lane passes.
 
 The first run is gated on `E:\\z-results\\glm53-native-2026-10-06\\chain2-requal-approved.txt` containing `PASS`, so full-model work cannot overtake CHAIN=2 correctness requalification.
+
+
+### Utilization phase cursor
+
+The canonical next-work cursor is now `docs/experiments/wrx80-glm53-utilization-execution-cursor.md`. ACTIVE unit: U00, repair/complete isolated validation of the conservative CHAIN=1 step-1 promotion before CHAIN=2 requalification.

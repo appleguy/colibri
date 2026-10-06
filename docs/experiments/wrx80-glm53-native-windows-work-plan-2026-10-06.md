@@ -477,3 +477,8 @@ Resume the WRX80 native-Windows GLM-5.3 plan from `docs/experiments/wrx80-glm53-
 - Structural residency benefit remains large and repeatable: ~15.9% worst-layer historical coverage with 27..28 resident experts/layer.
 - Active serialized benchmark is now the global-policy repeat. Sparse-profile global/fair arms remain queued behind it.
 - CHAIN=1 step-1 source work is staged but must not be built or committed until the active benchmark series releases the machine and the standard validation ladder passes.
+
+
+## Canonical utilization cursor
+
+The active optimization cursor has moved to `docs/experiments/wrx80-glm53-utilization-execution-cursor.md`. Use that file for the current U00-U90 execution order, gates, restart prompt, and source ownership. This historical plan remains authoritative for prior experiment rationale and completed N-series work.
