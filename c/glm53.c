@@ -1262,6 +1262,29 @@ static void mla_layer(const Cfg *c, const GLayer *l, const float *x, int tokens,
     float *pooled = malloc((size_t)L * sizeof(float));
     float *score = malloc((size_t)width * sizeof(float));
     const float scale = 1.0f / sqrtf((float)QK);
+#ifdef COLI_CUDA
+    int cuda_attn_mode = getenv("COLI_CUDA_GLM53_ATTN") ? atoi(getenv("COLI_CUDA_GLM53_ATTN")) : 0;
+    float *cuda_context = NULL;
+    int cuda_attn_ok = 0;
+    if (cuda_attn_mode && width <= 4096) {
+        GLayer *mutable_l = (GLayer *)l;
+        cuda_context = malloc((size_t)tokens * H * V * sizeof(*cuda_context));
+        if (!cuda_context) { fprintf(stderr, "OOM allocating CUDA MLA verify context\n"); exit(1); }
+        if (cuda_mat_ensure(&mutable_l->kvb_v))
+            cuda_attn_ok = coli_cuda_attention_absorbed_sparse_batch(
+                (ColiCudaTensor *)mutable_l->kvb_v.cuda, cuda_context, absorbed,
+                latent, selected, tokens, H, V, L, seen, width, scale);
+        if (cuda_attn_mode == 1 && cuda_attn_ok) {
+            for (int t = 0; t < tokens; t++)
+                mv(out + (size_t)t * c->hidden, &l->o,
+                   cuda_context + (size_t)t * H * V);
+            free(cuda_context); free(score); free(pooled); free(context);
+            free(selected); free(valid); free(head_w); free(iq);
+            free(absorbed); free(queries); free(qa);
+            return;
+        }
+    }
+#endif
     for (int t = 0; t < tokens; t++) {
         const int *chosen = selected + (size_t)t * width;
         for (int h = 0; h < H; h++) {
@@ -1295,7 +1318,28 @@ static void mla_layer(const Cfg *c, const GLayer *l, const float *x, int tokens,
             mv_rows(result, &l->kvb_v, pooled, h * V, V);
         }
         mv(out + (size_t)t * c->hidden, &l->o, context);
+#ifdef COLI_CUDA
+        if (cuda_attn_mode == 2 && cuda_attn_ok) {
+            const float *gc = cuda_context + (size_t)t * H * V;
+            float max_abs = 0.0f, max_rel = 0.0f;
+            for (int i = 0; i < H * V; i++) {
+                float da = fabsf(gc[i] - context[i]);
+                float dr = da / (fabsf(context[i]) + 1e-6f);
+                if (da > max_abs) max_abs = da;
+                if (dr > max_rel) max_rel = dr;
+            }
+            static int verify_reports = 0;
+            if (verify_reports < 16) {
+                fprintf(stderr, "[CUDA] GLM53 MLA verify token=%d max_abs=%.6g max_rel=%.6g\n",
+                        base + t, max_abs, max_rel);
+                verify_reports++;
+            }
+        }
+#endif
     }
+#ifdef COLI_CUDA
+    free(cuda_context);
+#endif
     free(score); free(pooled);
 
     free(context); free(selected); free(valid); free(head_w);
