@@ -2355,7 +2355,14 @@ extern "C" int coli_cuda_expert_group_host_clamped(
     if(!reserve_bytes(&ctx->glm_group_weights,&ctx->glm_group_weights_cap,weight_bytes)||
        !reserve_bytes(&ctx->glm_group_scales,&ctx->glm_group_scales_cap,scale_bytes))return 0;
 
-    ColiCudaTensor tg[64]={},tu[64]={},td[64]={};
+    /* ColiCudaTensor carries a 512-entry ragged-KV cache, so three fixed
+     * [64] descriptor arrays make this wrapper's Windows stack frame >5 MiB.
+     * Keep these temporary descriptors on the heap; expert_group_impl is
+     * synchronous in this path, so their lifetime through the call is enough. */
+    std::vector<ColiCudaTensor> tensor_tmp((size_t)count * 3);
+    ColiCudaTensor *tg = tensor_tmp.data();
+    ColiCudaTensor *tu = tg + count;
+    ColiCudaTensor *td = tu + count;
     uint8_t *dw=(uint8_t*)ctx->glm_group_weights;
     float *ds=(float*)ctx->glm_group_scales;
     size_t wo=0,so=0;
