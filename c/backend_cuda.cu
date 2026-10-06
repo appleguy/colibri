@@ -2502,7 +2502,7 @@ static int absorb_fmt_ok(const ColiCudaTensor *w){
 __global__ static void attention_absorbed_sparse_kernel(
         float *ctx,const float *q_abs,const float *latent,const int *selected,
         const void *weights,const float *wscale,int fmt,int S,int H,int V,int K,
-        int T,int width,float scale,int gs,int ng) {
+        int T,int width,float scale,int gs,int ng,int compact_latent) {
     int s=blockIdx.y,h=blockIdx.x,tid=threadIdx.x;
     if(s>=S||h>=H)return;
     extern __shared__ float sm[];
@@ -2514,7 +2514,7 @@ __global__ static void attention_absorbed_sparse_kernel(
         int at=sel[i];
         float a=-3.402823466e+38F;
         if(at>=0&&at<T){
-            a=0.f;const float *lt=latent+(size_t)at*K;
+            a=0.f;const float *lt=latent+(size_t)(compact_latent?i:at)*K;
             for(int k=0;k<K;k++)a+=q[k]*lt[k];
             a*=scale;
         }
@@ -2546,7 +2546,7 @@ __global__ static void attention_absorbed_sparse_kernel(
         float a=0.f;
         for(int i=0;i<width;i++){
             int at=sel[i];
-            if(at>=0&&at<T)a+=scores[i]*inv*latent[(size_t)at*K+k];
+            if(at>=0&&at<T)a+=scores[i]*inv*latent[(size_t)(compact_latent?i:at)*K+k];
         }
         pooled[k]=a;
     }
@@ -2585,7 +2585,7 @@ extern "C" int coli_cuda_attention_absorbed_sparse_batch(
     size_t shared=(size_t)(width+256+K)*sizeof(float);
     attention_absorbed_sparse_kernel<<<dim3((unsigned)H,(unsigned)S),256,shared,dc->stream>>>(
         dc->ac,dc->aq,dc->al,dc->asel,v_proj->weights,v_proj->scales,v_proj->fmt,
-        S,H,V,K,T,width,scale,v_proj->gs,v_proj->ng);
+        S,H,V,K,T,width,scale,v_proj->gs,v_proj->ng,0);
     if(!cuda_ok(cudaGetLastError(),"absorbed sparse attention launch")||
        !cuda_ok(cudaMemcpyAsync(ctx,dc->ac,cb,cudaMemcpyDeviceToHost,dc->stream),
                 "absorbed sparse context download")||
@@ -2620,7 +2620,7 @@ extern "C" int coli_cuda_attention_absorbed_sparse_project_batch(
     size_t shared=(size_t)(width+256+K)*sizeof(float);
     attention_absorbed_sparse_kernel<<<dim3((unsigned)H,(unsigned)S),256,shared,dc->stream>>>(
         dc->ac,dc->aq,dc->al,dc->asel,v_proj->weights,v_proj->scales,v_proj->fmt,
-        S,H,V,K,T,width,scale,v_proj->gs,v_proj->ng);
+        S,H,V,K,T,width,scale,v_proj->gs,v_proj->ng,0);
     if(!cuda_ok(cudaGetLastError(),"absorbed sparse attention launch"))return 0;
     quant_matmul<<<dim3(o_proj->O,S),256,0,dc->stream>>>(
         dc->y,dc->ac,o_proj->weights,o_proj->scales,o_proj->fmt,S,o_proj->I,o_proj->O,
@@ -2645,8 +2645,10 @@ extern "C" int coli_cuda_attention_absorbed_sparse_project_batch_dev_out(
     DeviceContext *dc=find_ctx(v_proj->device);if(!select_ctx(dc))return 0;
     size_t qb=(size_t)S*H*K*sizeof(float),lb=(size_t)T*K*sizeof(float);
     size_t sb=(size_t)S*width*sizeof(int),cb=(size_t)S*H*V*sizeof(float);
+    const int compact_latent=(S==1);
+    const size_t latent_upload_bytes=compact_latent?(size_t)width*K*sizeof(float):lb;
     if(!reserve(&dc->aq,&dc->aq_cap,qb)||
-       !reserve_chunked(&dc->al,&dc->al_cap,lb,8ull<<20)||
+       !reserve_chunked(&dc->al,&dc->al_cap,latent_upload_bytes,8ull<<20)||
        !reserve_bytes((void**)&dc->asel,&dc->asel_cap,sb)||
        !reserve(&dc->ac,&dc->ac_cap,cb))
         return 0;
@@ -2660,23 +2662,40 @@ extern "C" int coli_cuda_attention_absorbed_sparse_project_batch_dev_out(
                     "absorbed sparse staging reuse wait")) return 0;
         dc->sparse_upload_pending=0;
     }
-    if(!reserve_pinned(&dc->host_sparse,&dc->host_sparse_cap,qb+sb)) return 0;
+    const size_t staged_latent_bytes=compact_latent?latent_upload_bytes:0;
+    if(!reserve_pinned(&dc->host_sparse,&dc->host_sparse_cap,qb+sb+staged_latent_bytes)) return 0;
     unsigned char *stage=(unsigned char*)dc->host_sparse;
     std::memcpy(stage,q_abs,qb);
     std::memcpy(stage+qb,selected,sb);
+    if(compact_latent){
+        float *packed=(float*)(stage+qb+sb);
+        for(int i=0;i<width;i++){
+            int at=selected[i];
+            if(at>=0&&at<T) std::memcpy(packed+(size_t)i*K,latent+(size_t)at*K,(size_t)K*sizeof(float));
+            else std::memset(packed+(size_t)i*K,0,(size_t)K*sizeof(float));
+        }
+    }
     if(!cuda_ok(cudaMemcpyAsync(dc->aq,stage,qb,cudaMemcpyHostToDevice,dc->stream),
                 "absorbed sparse q upload (dev out)")||
        !cuda_ok(cudaMemcpyAsync(dc->asel,stage+qb,sb,cudaMemcpyHostToDevice,dc->stream),
-                "absorbed sparse selection upload (dev out)")||
-       !cuda_ok(cudaEventRecord(dc->sparse_upload_done,dc->stream),
-                "absorbed sparse staging event")||
-       !cuda_ok(cudaMemcpyAsync(dc->al,latent,lb,cudaMemcpyHostToDevice,dc->stream),
-                "absorbed sparse latent upload (dev out)"))return 0;
+                "absorbed sparse selection upload (dev out)"))return 0;
+    if(compact_latent){
+        if(!cuda_ok(cudaMemcpyAsync(dc->al,stage+qb+sb,latent_upload_bytes,
+                                   cudaMemcpyHostToDevice,dc->stream),
+                    "absorbed sparse compact latent upload (dev out)")||
+           !cuda_ok(cudaEventRecord(dc->sparse_upload_done,dc->stream),
+                    "absorbed sparse staging event"))return 0;
+    }else{
+        if(!cuda_ok(cudaEventRecord(dc->sparse_upload_done,dc->stream),
+                    "absorbed sparse staging event")||
+           !cuda_ok(cudaMemcpyAsync(dc->al,latent,lb,cudaMemcpyHostToDevice,dc->stream),
+                    "absorbed sparse latent upload (dev out)"))return 0;
+    }
     dc->sparse_upload_pending=1;
     size_t shared=(size_t)(width+256+K)*sizeof(float);
     attention_absorbed_sparse_kernel<<<dim3((unsigned)H,(unsigned)S),256,shared,dc->stream>>>(
         dc->ac,dc->aq,dc->al,dc->asel,v_proj->weights,v_proj->scales,v_proj->fmt,
-        S,H,V,K,T,width,scale,v_proj->gs,v_proj->ng);
+        S,H,V,K,T,width,scale,v_proj->gs,v_proj->ng,compact_latent);
     if(!cuda_ok(cudaGetLastError(),"absorbed sparse attention launch (dev out)"))return 0;
     quant_matmul<<<dim3(o_proj->O,S),256,0,dc->stream>>>(
         out_dev,dc->ac,o_proj->weights,o_proj->scales,o_proj->fmt,S,o_proj->I,o_proj->O,

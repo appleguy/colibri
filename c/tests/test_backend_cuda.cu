@@ -617,6 +617,30 @@ int main(int argc, char **argv) {
         return 1;
     }
     coli_cuda_pipe_free(d0,adev_out);
+
+    /* S=1 dev-out compacts only the selected latent rows before H2D. Compare
+     * that decode-specialized path against the full-history synchronous path. */
+    float aproj1[AO], adev1[AO], aq1[AH*AK];
+    int asel1[AW];
+    std::memcpy(aq1,aqa+AH*AK,sizeof(aq1));
+    std::memcpy(asel1,asel+AW,sizeof(asel1));
+    float *adev1_out=(float*)coli_cuda_pipe_alloc(d0,sizeof(adev1));
+    if(!adev1_out||
+       !coli_cuda_attention_absorbed_sparse_project_batch(
+            avt,opt,aproj1,aq1,ala,asel1,1,AH,AV,AK,AT,AW,.5f)||
+       !coli_cuda_attention_absorbed_sparse_project_batch_dev_out(
+            avt,opt,adev1_out,aq1,ala,asel1,1,AH,AV,AK,AT,AW,.5f)){
+        std::fprintf(stderr,"absorbed sparse CUDA compact decode execution failed\n");
+        return 1;
+    }
+    std::memset(aq1,0x5a,sizeof(aq1));
+    for(int i=0;i<AW;i++) asel1[i]=-7654321;
+    if(!coli_cuda_pipe_download(d0,adev1_out,adev1,sizeof(adev1))||
+       !close_enough(adev1,aproj1,AO)){
+        std::fprintf(stderr,"absorbed sparse CUDA compact decode mismatch\n");
+        return 1;
+    }
+    coli_cuda_pipe_free(d0,adev1_out);
     coli_cuda_tensor_free(opt);
     coli_cuda_tensor_free(avt);
 
