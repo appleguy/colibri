@@ -473,6 +473,50 @@ int main(int argc, char **argv) {
        !close_enough(actx,aref,2))return 1;
     coli_cuda_tensor_free(at);
 
+    /* GLM-5.3 sparse absorbed MLA: q is already projected into latent space
+     * and selected[] names the only cache rows allowed into the softmax. */
+    constexpr int AS=2, AH=2, AV=3, AK=4, AT=5, AW=3;
+    const float avw[AH*AV*AK]={
+        1,0,0,0, 0,1,0,0, 0,0,1,0,
+        0,0,0,1, 1,1,0,0, 0,1,1,0
+    };
+    const float aqa[AS*AH*AK]={
+        1,.5f,-.25f,.75f, -.5f,1,.25f,.5f,
+        .25f,.5f,1,-.5f, 1,-.25f,.5f,.75f
+    };
+    const float ala[AT*AK]={
+        1,0,.5f,-.5f, 0,1,-.25f,.75f, .5f,.5f,1,0,
+        -.5f,.25f,.75f,1, .2f,-.4f,.6f,.8f
+    };
+    const int asel[AS*AW]={0,2,-1, 1,3,4};
+    float agpu[AS*AH*AV], acpu[AS*AH*AV];
+    ColiCudaTensor *avt=nullptr;
+    if(!coli_cuda_tensor_upload_g(&avt,avw,nullptr,0,AK,AH*AV,d0,0))return 1;
+    for(int ss=0;ss<AS;ss++)for(int h=0;h<AH;h++){
+        float sc[AW],mx=-INFINITY,z=0,pooled[AK]={0,0,0,0};
+        for(int i=0;i<AW;i++){
+            int at2=asel[ss*AW+i];
+            if(at2<0||at2>=AT){sc[i]=-INFINITY;continue;}
+            float a=0;for(int k=0;k<AK;k++)a+=aqa[(ss*AH+h)*AK+k]*ala[at2*AK+k];
+            sc[i]=a*.5f;mx=sc[i]>mx?sc[i]:mx;
+        }
+        for(int i=0;i<AW;i++)if(asel[ss*AW+i]>=0){sc[i]=std::exp(sc[i]-mx);z+=sc[i];}
+        for(int i=0;i<AW;i++){
+            int at2=asel[ss*AW+i];if(at2<0)continue;float ww=sc[i]/z;
+            for(int k=0;k<AK;k++)pooled[k]+=ww*ala[at2*AK+k];
+        }
+        for(int v=0;v<AV;v++){
+            float a=0;for(int k=0;k<AK;k++)a+=pooled[k]*avw[(h*AV+v)*AK+k];
+            acpu[(ss*AH+h)*AV+v]=a;
+        }
+    }
+    if(!coli_cuda_attention_absorbed_sparse_batch(avt,agpu,aqa,ala,asel,AS,AH,AV,AK,AT,AW,.5f)||
+       !close_enough(agpu,acpu,AS*AH*AV)){
+        std::fprintf(stderr,"absorbed sparse CUDA attention mismatch\n");
+        return 1;
+    }
+    coli_cuda_tensor_free(avt);
+
     /* Native s4 WMMA path: compare the quantized-activation result against the
        existing FP32-activation/s4-weight grouped implementation. */
     uint8_t w4[32*32/2]; float ws4[32], gx4[64], scalar4[64], async4[64], tensor4[64], pinned4[64], clamped4[64], resident4[64];
