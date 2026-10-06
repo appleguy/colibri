@@ -708,6 +708,7 @@ typedef struct {
     float *kda_window;                    /* [3 * proiezione * kernel] */
     float *latent;                        /* [cap][kv_lora]: MLA assorbita */
     float *ikeys, *igates;                /* [cap][dim indexer] */
+    unsigned char *ivalid;                /* [cap], currently all valid */
 } GLayerState;
 
 #ifdef COLI_CUDA
@@ -1332,8 +1333,7 @@ static int mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
     float *ik = st->ikeys;
     float *gates = st->igates;
     float *head_w = malloc((size_t)tokens * IH * sizeof(float));
-    unsigned char *valid = malloc((size_t)seen);
-    memset(valid, 1, (size_t)seen);
+    unsigned char *valid = st->ivalid;
 
     for (int t = 0; t < tokens; t++) {
         const int at = base + t;          /* posizione assoluta nella cache */
@@ -1472,7 +1472,7 @@ static int mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
         if (cuda_chain_ok) g_cuda_attn_success++;
         else g_cuda_attn_fallback++;
         if (chain_mode == 1 && cuda_chain_ok) {
-            free(selected); free(valid); free(head_w); free(iq);
+            free(selected); free(head_w); free(iq);
             free(absorbed); free(queries); free(qa);
             return 1;
         }
@@ -1500,7 +1500,7 @@ static int mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
         else g_cuda_attn_fallback++;
         if (cuda_attn_mode == 1 && cuda_attn_ok) {
             free(score); free(pooled); free(context);
-            free(selected); free(valid); free(head_w); free(iq);
+            free(selected); free(head_w); free(iq);
             free(absorbed); free(queries); free(qa);
             return 0;
         }
@@ -1570,7 +1570,7 @@ static int mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
 #endif
     free(score); free(pooled);
 
-    free(context); free(selected); free(valid); free(head_w);
+    free(context); free(selected); free(head_w);
     free(iq); free(absorbed); free(queries); free(qa);
 #ifdef COLI_CUDA
     return cuda_chain_ok;
@@ -3598,9 +3598,11 @@ static GSession *session_open(const GModel *m, int cap) {
             st->latent = malloc((size_t)cap * c->kv_lora * sizeof(float));
             st->ikeys = malloc((size_t)cap * c->index_hd * sizeof(float));
             st->igates = malloc((size_t)cap * c->index_hd * sizeof(float));
-            if (!st->latent || !st->ikeys || !st->igates) {
+            st->ivalid = malloc((size_t)cap);
+            if (!st->latent || !st->ikeys || !st->igates || !st->ivalid) {
                 fprintf(stderr, "OOM allocating cache for layer %d\n", i); exit(1);
             }
+            memset(st->ivalid, 1, (size_t)cap);
         } else if (c->kda_proj) {
             st->kda_state = calloc((size_t)c->kda_heads * c->kda_hd * c->kda_hd,
                                    sizeof(float));
@@ -3625,7 +3627,7 @@ static void session_close(const GModel *m, GSession *s) {
     if (!s) return;
     for (int i = 0; i < m->c.n_layers; i++) {
         GLayerState *st = &s->layer[i];
-        free(st->latent); free(st->ikeys); free(st->igates);
+        free(st->latent); free(st->ikeys); free(st->igates); free(st->ivalid);
         free(st->kda_state); free(st->kda_window);
     }
     free(s->kda_scratch);
