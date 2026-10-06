@@ -6,7 +6,7 @@ Upstream base: `JustVugg/colibri:main`
 Primary target host: WRX80, Threadripper PRO 5955WX (16C/32T), RTX 4090 24,564 MiB, WSL2 capped at 244 GiB.
 Model: GLM-5.3-Flash grouped-int4 / gs=64.
 
-This is the authoritative phase/status document for the WRX80 GLM-5.3 performance work. Keep it current as measurements or architectural decisions change. The chronological raw experiment log remains in `docs/experiments/wrx80-glm53-resident-2026-10-06.md`.
+This is the authoritative phase/status document for the WRX80 GLM-5.3 performance work. Keep it current as measurements or architectural decisions change. The concise resumable work queue, dependency graph, serialized host sequence, and wake prompt live in `docs/experiments/wrx80-glm53-execution-ledger.md`. The chronological raw experiment log remains in `docs/experiments/wrx80-glm53-resident-2026-10-06.md`.
 
 ## Global objective and guardrails
 
