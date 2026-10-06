@@ -107,9 +107,10 @@ Completed checkpoints:
 - `2351d9d1` completes the S=1 **shared expert from resident device row** verification path: resident `rg/ru/rd` matrices run `pipe_gemm -> pipe_gemm -> pipe_swiglu_clamped -> pipe_gemm` from `x_dev`, then one D-row is downloaded and compared with the existing host shared-expert result. CPU and CUDA-linked GLM builds pass; host output remains authoritative until real-run parity.
 - `2812d439` refactors the shared-expert helper to **retain its D-row contribution on-device** and moves the verification download to the caller. Numerics are unchanged, CPU/CUDA-linked GLM builds pass, and the device row is now composable with routed-expert contributions before mHC post.
 - `9959c261` mirrors that refactor for the S=1 resident routed-expert helper: it now returns its device accumulator, while the caller performs the verification download. CPU/CUDA-linked GLM builds pass; CPU output remains authoritative.
+- `5b4824ab` composes the retained shared and resident-routed device D-row contributions with `coli_cuda_pipe_add` and verifies the combined row against the host `out` state before nonresident experts are processed. CPU/CUDA-linked GLM builds pass; GPU output remains qualification-only.
 
 Work:
-- sum the shared and resident-routed device D-row contributions before mHC post under verification mode;
+- thread the combined resident device D-row through the FFN caller and into device mHC post under verification mode;
 - after real-run parity, make the shared expert and device-row resident routed-expert contributions authoritative and avoid their host activation staging;
 - preserve residual stream across layer boundaries;
 - replace broad synchronizations with dependency-local synchronization.
