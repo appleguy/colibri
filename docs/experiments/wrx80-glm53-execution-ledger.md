@@ -594,3 +594,8 @@ The staged CHAIN=1 step-1 source now passes both the isolated CPU build and isol
 ### U00.3 checkpoint — full isolated validation PASS
 
 The conservative CHAIN=1 step-1 source passed the complete isolated validation ladder: native CPU build, CUDA DLL build, CUDA-linked `glm53.exe`, RTX q8/q4/q2/f32/e8 numerical test, and the 12-case Windows loader ABI fixture. The earlier CUDA-test wrapper error was PowerShell stderr handling, not a test failure. Next unit is source-only commit/push of the validated `c/glm53.c` change after confirming the main checkout matches the validated worktree patch.
+
+
+### U00 complete - CHAIN=1 step-1 source committed
+
+The conservative CHAIN=1 site-entry/device-FFN/device-post promotion is now committed as `fb61f73` after the full isolated validation ladder passed. Main and isolated source copies matched exactly after newline normalization. The next serialized gate is U01.1 CHAIN=2 short requalification; do not release the full-model comparison sentinel before reviewing that run.

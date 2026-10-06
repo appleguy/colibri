@@ -311,17 +311,17 @@ Use the full model to answer:
 
 ## Current execution cursor
 
-ACTIVE: U00.
+ACTIVE: U01.1.
 
 Exact next actions:
-1. Verify no `glm53` benchmark is active and no useful marshal owns the GPU.
-2. Inspect the isolated validator exit after `make clean`.
-3. Manually execute the first failed/missing validation command in `E:\z-src\colibri-chain1-validate\c`.
-4. Repair the validator only if the command itself is valid and the wrapper is at fault.
-5. Complete the validation ladder.
-6. Commit/push the CHAIN=1 step-1 source change only after all gates pass.
-7. Update this cursor and execution ledger.
-8. Advance to U01 CHAIN=2 requalification.
+1. Verify no `glm53` benchmark is active and the GPU is free.
+2. Rebuild/copy the validated native binary for source commit `fb61f73` only if the active binary does not already correspond to that source.
+3. Enable one short CHAIN=2 qualification arm from `c/scripts/wrx80_glm53_future_benchmarks.json`.
+4. Use CHAIN=2, ATTN=1, ROUTER=1, INDEXER=1 on the deterministic short workload.
+5. Require mHC pre/norm/post/combined verification, whole residual-bank verification, authoritative indexer success, no fallback/error, and plausible output.
+6. Preserve wall time, VRAM, drift maxima and telemetry before deciding PASS.
+7. Write `chain2-requal-approved.txt` only after evidence review; otherwise keep the full-model comparison marshal blocked.
+8. Update cursor/ledger and then advance to U10 real CHAIN=1 short A/B.
 
 Independent work allowed while U00/U01 inference is active:
 - offline U40 residency simulation improvements;
@@ -360,3 +360,11 @@ Resume WRX80 native-Windows GLM-5.3 optimization from `docs/experiments/wrx80-gl
 - Loader stub fixture initially skipped because the direct Python command lacked w64devkit `gcc`/`objdump` on PATH. Rerun with explicit w64devkit PATH executed the intended fixture: **12/12 tests PASS** in 4.425 s. Evidence: `loader-test-direct.log`.
 - U00 validation is now complete: diff check, CPU build, CUDA DLL build, CUDA-linked GLM build, RTX numerical suite, and loader ABI fixture all pass.
 - ACTIVE next action: U00.4, verify the main-checkout `c/glm53.c` diff is byte/semantic-equivalent to the validated isolated-worktree patch, commit only that source file, push, then checkpoint docs and advance the cursor to U01 CHAIN=2 short requalification.
+
+
+### U00.4 source checkpoint - COMPLETE
+
+- Validated isolated and main `c/glm53.c` files are semantically byte-identical after newline normalization; normalized SHA-256: `26562a09bfc58f1f518cce74d4e77829a8f4cf7fce454e1c0393c9ab44d0e067`.
+- Source commit: `fb61f73` (`glm53-enable-conservative-chain1-site-entry`).
+- Only `c/glm53.c` was staged/committed; unfinished `c/backend_cuda.cu` profiling work remains owned and uncommitted.
+- U00 is complete. ACTIVE unit is now U01.1 CHAIN=2 short requalification.
