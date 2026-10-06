@@ -32,10 +32,10 @@ representation, and platform efficiency, but it is no longer the top steady-stat
 optimization target for this workload.
 
 Current service:
-- WSL Colibri active, queue empty, no failures;
-- ~82 GiB WSL memory available;
-- swap 0;
-- RTX 4090 roughly 20.8 GiB resident at the latest observation.
+- WSL Colibri active with one useful inference in flight, no queued work and no failures;
+- latest completed profile is `seq=7`: **30,075 prompt + 89 completion tokens**, **4625.896 s wall**, **1458.807 s expert matmul**, **3086.756 s attention**, **1.239 s expert disk**, **170 forwards**;
+- ~81.8 GiB WSL memory available, swap 0;
+- RTX 4090 roughly 20.8 GiB resident at the latest observation, with live utilization sampled at 20%; CPU was ~794% aggregate.
 
 Do not restart WSL or start a competing full native model until this baseline run reaches
 a safe stop/finish.
@@ -93,6 +93,9 @@ Exit:
 
 Goal: eliminate the host bubbles between current high-utilization CUDA bursts.
 
+Completed checkpoint:
+- `e825ed26` adds a tested `coli_cuda_attention_absorbed_sparse_project_batch_dev_out` backend/Windows-ABI primitive. Sparse MLA + resident `o_proj` can now leave `[S,O]` on device instead of forcing its final D2H. CUDA parity and native-Windows loader ABI tests pass. GLM-5.3 caller integration is intentionally deferred until the following hyperconnection boundary can also stay on device.
+
 Work:
 - retain fused sparse-MLA output on device;
 - chain norm/projection/residual into the next stage without download/re-upload;
@@ -105,14 +108,19 @@ Exit:
 ### U30 — GPU-native router and resident MoE decode
 **Class:** P
 **Depends on:** U20 for best final path; implementation/profiling can start now
-**Status:** PLANNED / reusable backend exists
+**Status:** ACTIVE / DECODE ROUTER IMPLEMENTED, NOT YET DEPLOYED
 **Priority:** P0
 
 Goal: remove CPU routing/top-k and keep S=1 decode expert dispatch device-side.
 
+Completed checkpoints:
+- `da318128` adds an opt-in `COLI_CUDA_GLM53_ROUTER=1` S=1 router. Router/bias weights are lazily resident on the 4090, only the current hidden row is uploaded, and top-k indices/weights return through the existing device router. Any CUDA allocation/upload/router failure falls back before route tracing to the unchanged CPU path. The backend test explicitly verifies GLM's correction-bias selection versus raw-sigmoid normalized weights; CPU and CUDA-linked GLM builds pass.
+- `5b335f09` adds `COLI_CUDA_GLM53_ROUTER=2` qualification mode: GPU routing runs, but the scalar CPU router remains authoritative and selection/weight drift is reported. This is the deployment gate before mode 1 becomes a trusted runtime optimization.
+- `0979097e` prewarms all 42 sparse-layer router matrices+biases before the resident-expert tier is sized, eliminating first-decode lazy uploads and making expert residency account for router VRAM first. The checkpoint's raw router payload is **189.1 MiB** for the actual 4096-hidden/288-expert model; startup logs the real `cudaMemGetInfo` charge because allocator padding can be larger. CPU and CUDA-linked builds pass.
+
 Work:
-- resident router matrix + bias;
-- GPU logits/top-k/gates;
+- deploy mode 2 at the next safe restart and qualify route parity over real decode;
+- if parity is clean, switch to mode 1 and measure router wall-time delta;
 - direct dispatch to resident experts;
 - re-sweep the historical small-group CPU cutoff after H2D weight/activation transfers
   are removed;
