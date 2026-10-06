@@ -2887,10 +2887,11 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
     mlp3_batch(out, x, tokens, &l->rg, &l->ru, &l->rd, c->swiglu_limit);
     if (shared_t0) m->t_moe_shared += now_s() - shared_t0;
 #ifdef COLI_CUDA
+    float *shared_out_dev = NULL;
     if (tokens == 1 && x_dev && cuda_chain_mode() == 2) {
         float *shared_dev = malloc((size_t)c->hidden * sizeof(float));
         if (!shared_dev) { fprintf(stderr, "OOM allocating shared expert verification row\n"); exit(1); }
-        float *shared_out_dev = cuda_shared_mlp_dev(m, (GLayer *)l, x_dev);
+        shared_out_dev = cuda_shared_mlp_dev(m, (GLayer *)l, x_dev);
         if (shared_out_dev &&
             coli_cuda_pipe_download(g_cuda_device, shared_out_dev, shared_dev,
                                     (size_t)c->hidden * sizeof(float))) {
@@ -2984,6 +2985,27 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
                             "max_abs=%.6g max_rel=%.6g\n",
                             index, max_abs, max_rel);
                     resident_verify_reports++;
+                }
+            }
+            if (shared_out_dev && resident_out_dev &&
+                coli_cuda_pipe_add(g_cuda_device, shared_out_dev, resident_out_dev,
+                                   (size_t)c->hidden) &&
+                coli_cuda_pipe_download(g_cuda_device, shared_out_dev, resident_dev,
+                                        (size_t)c->hidden * sizeof(float))) {
+                float max_abs = 0.0f, max_rel = 0.0f;
+                for (int q = 0; q < c->hidden; q++) {
+                    const float da = fabsf(resident_dev[q] - out[q]);
+                    const float dr = da / (fabsf(out[q]) + 1e-6f);
+                    if (da > max_abs) max_abs = da;
+                    if (dr > max_rel) max_rel = dr;
+                }
+                static int combined_verify_reports = 0;
+                if (combined_verify_reports < 16) {
+                    fprintf(stderr,
+                            "[CUDA] GLM53 shared+resident dev-row verify layer=%d "
+                            "max_abs=%.6g max_rel=%.6g\n",
+                            index, max_abs, max_rel);
+                    combined_verify_reports++;
                 }
             }
             int keep = 0;
