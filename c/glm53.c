@@ -1433,7 +1433,7 @@ static void cuda_expert_budget_init(void) {
     if (setting && *setting) {
         char *end = NULL;
         double gb = strtod(setting, &end);
-        if (end == setting || *end || !isfinite(gb) || gb < 0.0 || gb > 20.0) {
+        if (end == setting || *end || !isfinite(gb) || gb < 0.0 || gb > 24.0) {
             fprintf(stderr, "[CUDA] ignoring invalid COLI_CUDA_RESIDENT_EXPERT_GB=%s\n", setting);
         } else {
             g_cuda_resident_expert_gb = gb;
