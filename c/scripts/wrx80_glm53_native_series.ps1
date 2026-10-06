@@ -70,7 +70,11 @@ foreach ($run in $cfg.runs) {
   foreach ($p in $cfg.base_env.PSObject.Properties) { Set-Item -Path "Env:$($p.Name)" -Value ([string]$p.Value) }
   foreach ($p in $run.env.PSObject.Properties) { Set-Item -Path "Env:$($p.Name)" -Value ([string]$p.Value) }
 
-  $prompt = (($cfg.prompt_unit * $cfg.prompt_repeat).Substring(0, $cfg.prompt_chars))
+  $promptRepeat = if ($null -ne $run.prompt_repeat) { [int]$run.prompt_repeat } else { [int]$cfg.prompt_repeat }
+  $promptChars = if ($null -ne $run.prompt_chars) { [int]$run.prompt_chars } else { [int]$cfg.prompt_chars }
+  $promptSource = $cfg.prompt_unit * $promptRepeat
+  if ($promptChars -gt $promptSource.Length) { throw "prompt_chars $promptChars exceeds generated prompt length $($promptSource.Length)" }
+  $prompt = $promptSource.Substring(0, $promptChars)
   $stdout = Join-Path $runDir "stdout.log"
   $stderr = Join-Path $runDir "stderr.log"
   $samples = Join-Path $runDir "telemetry.csv"
