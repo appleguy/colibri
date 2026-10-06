@@ -2634,7 +2634,9 @@ extern "C" int coli_cuda_attention_absorbed_sparse_project_batch_dev_out(
        !cuda_ok(cudaMemcpyAsync(dc->al,latent,lb,cudaMemcpyHostToDevice,dc->stream),
                 "absorbed sparse latent upload (dev out)")||
        !cuda_ok(cudaMemcpyAsync(dc->asel,selected,sb,cudaMemcpyHostToDevice,dc->stream),
-                "absorbed sparse selection upload (dev out)"))return 0;
+                "absorbed sparse selection upload (dev out)")||
+       !cuda_ok(cudaStreamSynchronize(dc->stream),
+                "absorbed sparse input upload synchronize (dev out)"))return 0;
     size_t shared=(size_t)(width+256+K)*sizeof(float);
     attention_absorbed_sparse_kernel<<<dim3((unsigned)H,(unsigned)S),256,shared,dc->stream>>>(
         dc->ac,dc->aq,dc->al,dc->asel,v_proj->weights,v_proj->scales,v_proj->fmt,
@@ -2643,9 +2645,7 @@ extern "C" int coli_cuda_attention_absorbed_sparse_project_batch_dev_out(
     quant_matmul<<<dim3(o_proj->O,S),256,0,dc->stream>>>(
         out_dev,dc->ac,o_proj->weights,o_proj->scales,o_proj->fmt,S,o_proj->I,o_proj->O,
         row_bytes(o_proj->fmt,o_proj->I),o_proj->gs,o_proj->ng);
-    if(!cuda_ok(cudaGetLastError(),"absorbed sparse o_proj launch (dev out)")||
-       !cuda_ok(cudaStreamSynchronize(dc->stream),"absorbed sparse project synchronize (dev out)"))
-        return 0;
+    if(!cuda_ok(cudaGetLastError(),"absorbed sparse o_proj launch (dev out)")) return 0;
     return 1;
 }
 
