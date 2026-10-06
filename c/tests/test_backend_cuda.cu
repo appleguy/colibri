@@ -475,7 +475,7 @@ int main(int argc, char **argv) {
 
     /* Native s4 WMMA path: compare the quantized-activation result against the
        existing FP32-activation/s4-weight grouped implementation. */
-    uint8_t w4[32*32/2]; float ws4[32], gx4[64], scalar4[64], async4[64], tensor4[64], pinned4[64];
+    uint8_t w4[32*32/2]; float ws4[32], gx4[64], scalar4[64], async4[64], tensor4[64], pinned4[64], clamped4[64], resident4[64];
     for(int i=0;i<(int)sizeof(w4);i++){
         int lo=((i%15)-7)&15,hi=(((i*3)%15)-7)&15;
         w4[i]=(uint8_t)(lo|(hi<<4));
@@ -521,10 +521,27 @@ int main(int argc, char **argv) {
     }
     unsetenv("COLI_CUDA_TC_W4A16");
     unsetenv("COLI_CUDA_TC_W4A16_MIN");
+    /* GLM-5.3's clamped SwiGLU path requires grouped-int4 (fmt=4).
+     * Compare the generic lazy-upload barrier path with the resident path on
+     * already-uploaded tensors: skipping that barrier must be bit-identical. */
+    float gs4[64];
+    for(int o=0;o<32;o++){ gs4[o*2]=ws4[o]; gs4[o*2+1]=ws4[o]*0.75f; }
+    ColiCudaTensor *cg4=nullptr,*cu4=nullptr,*cd4=nullptr;
+    if(!coli_cuda_tensor_upload_g(&cg4,w4,gs4,4,32,32,d0,16) ||
+       !coli_cuda_tensor_upload_g(&cu4,w4,gs4,4,32,32,d0,16) ||
+       !coli_cuda_tensor_upload_g(&cd4,w4,gs4,4,32,32,d0,16)) return 1;
+    ColiCudaTensor *cgg4[2]={cg4,cg4},*cug4[2]={cu4,cu4},*cdg4[2]={cd4,cd4};
+    if(!coli_cuda_expert_group_clamped(cgg4,cug4,cdg4,group_rows,2,clamped4,gx4,6.f) ||
+       !coli_cuda_expert_group_clamped_resident(cgg4,cug4,cdg4,group_rows,2,resident4,gx4,6.f) ||
+       std::memcmp(clamped4,resident4,sizeof(clamped4))){
+        std::fprintf(stderr,"resident clamped CUDA group differs from generic clamped path\n");
+        return 1;
+    }
+    coli_cuda_tensor_free(cg4);coli_cuda_tensor_free(cu4);coli_cuda_tensor_free(cd4);
     coli_cuda_tensor_free(g4);coli_cuda_tensor_free(u4);coli_cuda_tensor_free(d4);
     uint64_t group_calls=0,group_experts=0,group_total_rows=0;
     coli_cuda_group_stats(&group_calls,&group_experts,&group_total_rows,nullptr,nullptr,nullptr);
-    if(group_calls!=6||group_experts!=12||group_total_rows!=12) return 1;
+    if(group_calls!=8||group_experts!=16||group_total_rows!=16) return 1;
 
     coli_cuda_stats(-1, &count, &bytes);
     if (count != 7 || bytes != 166) {
