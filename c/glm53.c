@@ -741,6 +741,7 @@ typedef struct {
     uint64_t gpu_expert_calls, gpu_expert_rows, gpu_expert_hits, gpu_expert_fallback;
     uint64_t gpu_expert_avoided_h2d_bytes;
     double gpu_expert_seconds;
+    size_t gpu_vram_peak_used, gpu_vram_min_free, gpu_vram_total;
     int *gpu_resident_pos, *gpu_resident_row_ids;
     float *gpu_resident_row_weights, *gpu_resident_xg, *gpu_resident_tmp, *gpu_resident_acc;
     size_t gpu_resident_rows_cap, gpu_resident_union_cap, gpu_resident_tokens_cap;
@@ -759,6 +760,25 @@ typedef struct {
 } GModel;
 
 static double now_s(void);
+
+static void profile_vram_sample(GModel *m) {
+#ifdef COLI_CUDA
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *s = getenv("GLM53_PROFILE_VRAM");
+        enabled = s && *s && atoi(s) != 0;
+    }
+    if (!enabled || !g_cuda_ready) return;
+    size_t free_b = 0, total_b = 0;
+    if (!coli_cuda_mem_info(g_cuda_device, &free_b, &total_b) || total_b < free_b) return;
+    const size_t used_b = total_b - free_b;
+    if (used_b > m->gpu_vram_peak_used) m->gpu_vram_peak_used = used_b;
+    if (!m->gpu_vram_min_free || free_b < m->gpu_vram_min_free) m->gpu_vram_min_free = free_b;
+    m->gpu_vram_total = total_b;
+#else
+    (void)m;
+#endif
+}
 
 static const float *load_f32(GModel *m, const char *fmt, ...) {
     char name[512];
@@ -3161,6 +3181,9 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
             /* Un solo paio di letture del clock per sito, il ramo dice a chi
              * va il tempo. */
             *(site ? &m->t_ffn : &m->t_attn) += now_s() - t_phase;
+            /* Optional cudaMemGetInfo sampling lives outside the phase timer so
+             * measurement overhead never inflates attention_s/ffn_s. */
+            profile_vram_sample(m);
             for (int t = 0; t < n; t++)
                 coli_hc_post(next + (size_t)t * H * D, branch + (size_t)t * D,
                              streams + (size_t)t * H * D, post + (size_t)t * H,
@@ -3400,6 +3423,14 @@ static float *forward_span(GModel *m, GSession *s, const int *tokens, int n,
                     "[PROF] GLM53 rolling forwards=%llu attn=%.3f indexer=%.3f ffn=%.3f router=%.3f disk=%.3f head=%.3f\n",
                     (unsigned long long)m->forwards,
                     m->t_attn, m->t_indexer, m->t_ffn, m->t_router, m->t_disk, m->t_head);
+#ifdef COLI_CUDA
+        if (every > 0 && (m->forwards % (uint64_t)every) == 0 && m->gpu_vram_total)
+            fprintf(stderr,
+                    "[PROF] GLM53 vram peak_used=%.1fMiB min_free=%.1fMiB total=%.1fMiB\n",
+                    m->gpu_vram_peak_used / 1048576.0,
+                    m->gpu_vram_min_free / 1048576.0,
+                    m->gpu_vram_total / 1048576.0);
+#endif
     }
 
     free(normed); free(collapsed);
