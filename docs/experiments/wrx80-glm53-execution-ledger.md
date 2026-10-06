@@ -532,3 +532,20 @@ Corrected next sequence:
 3. Re-qualify with mode 2, then compare real mode 1 against the ordinary GPU-attention arm.
 
 `fce27ad` also adds opt-in `COLI_CUDA_RESIDENT_LAYER_FAIR=1`; default behavior remains the original global heat admission policy until an A/B run proves the fair policy improves complete-set residency and wall time.
+
+
+### Native Windows G2 fair-residency A/B — 2026-10-06
+
+G2 changed only `COLI_CUDA_RESIDENT_LAYER_FAIR=1` relative to frozen G1 (`CHAIN=0`, `ATTN=1`, `ROUTER=1`, `INDEXER=1`, same 551-token prompt and 8-token tail).
+
+Observed:
+- same resident budget: 1,142 experts / 15.06 GiB VRAM;
+- historical selection-mass coverage: 23.7% total vs ~24.1% for global heat order;
+- worst-layer historical coverage improved from ~2.4% to **15.9%**;
+- resident experts/layer became **27..28** instead of roughly 3..40;
+- authoritative indexer reported 8/8 successes with fallback=0;
+- cumulative forward-13 attention: 107.968 s; FFN: 101.742 s;
+- peak CUDA used 22,653.5 MiB, minimum free 1,910 MiB;
+- decode: **8 tokens in 6.0 s = 1.332 tok/s**.
+
+Frozen G1 was 1.299 tok/s, so this first fair-policy sample is about **2.5% faster** while dramatically improving worst-layer residency coverage. Treat the speed delta as provisional until the queued fair-repeat/global-repeat pair completes.
