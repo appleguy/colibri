@@ -3282,11 +3282,13 @@ extern "C" int coli_cuda_pipe_router(int device,const float *x_dev,
     float *chc  =coli_cuda_pipe_scratch(device,23,(size_t)E*sizeof(float));
     char  *out  =(char*)coli_cuda_pipe_scratch(device,24,pack);
     if(!logit||!chc||!out) return 0;
-    pipe_router_logits<<<E,128>>>(x_dev,(const float*)rw_dev,(const float*)rb_dev,D,logit,chc);
-    pipe_router_select<<<1,1>>>(logit,chc,E,Ksel,topp,norm_topk,routed_scale,out);
+    pipe_router_logits<<<E,128,0,ctx->stream>>>(x_dev,(const float*)rw_dev,(const float*)rb_dev,D,logit,chc);
+    pipe_router_select<<<1,1,0,ctx->stream>>>(logit,chc,E,Ksel,topp,norm_topk,routed_scale,out);
     if(!cuda_ok(cudaGetLastError(),"pipe router launch")) return 0;
     char buf[64*(sizeof(int)+sizeof(float))+sizeof(int)];
-    if(!cuda_ok(cudaMemcpy(buf,out,pack,cudaMemcpyDeviceToHost),"pipe router readback")) return 0;
+    if(!cuda_ok(cudaMemcpyAsync(buf,out,pack,cudaMemcpyDeviceToHost,ctx->stream),
+                "pipe router readback") ||
+       !cuda_ok(cudaStreamSynchronize(ctx->stream),"pipe router synchronize")) return 0;
     memcpy(idx_host,buf,(size_t)Ksel*sizeof(int));
     memcpy(w_host,buf+Ksel*sizeof(int),(size_t)Ksel*sizeof(float));
     memcpy(keff_host,buf+Ksel*(sizeof(int)+sizeof(float)),sizeof(int));
