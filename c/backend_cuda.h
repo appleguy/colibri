@@ -213,6 +213,21 @@ COLI_CUDA_DLLEXPORT int coli_cuda_expert_group(ColiCudaTensor *const *gates,
                            ColiCudaTensor *const *downs,
                            const int *rows, int count,
                            float *y, const float *x);
+/* GLM-5.3 grouped int4 experts with its gate/up SwiGLU clamp applied before
+ * SiLU. Unsupported quantization formats decline so callers can use CPU. */
+COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_clamped(ColiCudaTensor *const *gates,
+                           ColiCudaTensor *const *ups,
+                           ColiCudaTensor *const *downs,
+                           const int *rows, int count,
+                           float *y, const float *x, float swiglu_limit);
+/* Host streamed GLM int4 blocks: weights/scales are copied into reusable
+ * bounded CUDA scratch, then dispatched with the model's clamped SwiGLU. */
+COLI_CUDA_DLLEXPORT int coli_cuda_expert_group_host_clamped(
+                           const uint8_t *const *gate_w,const float *const *gate_s,
+                           const uint8_t *const *up_w,const float *const *up_s,
+                           const uint8_t *const *down_w,const float *const *down_s,
+                           const int *rows,int count,int D,int I,int gs,int device,
+                           float *y,const float *x,float swiglu_limit);
 /* Same operation, but force the small-batch grouped kernel family when
  * pin_small_batch is nonzero.  Speculative verification uses this to keep
  * CUDA on the same numeric family as S=1 regardless of accepted draft depth. */

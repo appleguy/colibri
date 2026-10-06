@@ -150,7 +150,11 @@ whole rendering is pinned byte for byte against `chat_template.jinja`
 See `docs/ENVIRONMENT.md` for the table. The ones that change the shape of a run:
 `GLM53_BITS` (dense precision, default 4), `GLM53_EXPERT_GB` (expert cache;
 measured from available memory when unset), `GLM53_MAX_IMAGE_TOKENS`,
-`GLM53_PREFILL_CHUNK`, `GLM53_MAXT`.
+`GLM53_PREFILL_CHUNK`, `GLM53_MAXT`. On a CUDA build, `COLI_CUDA=1` also
+enables dense/shared CUDA matrices and clamped grouped int4 routed experts.
+`COLI_CUDA_EXPERT_GB` bounds transient expert staging (default 8 GiB), while
+`COLI_CUDA_EXPERT_MIN_ROWS` (default 32) leaves small decode groups on CPU.
+Both paths keep the CPU fallback available.
 
 ## Tests
 
@@ -188,3 +192,36 @@ but that **two different images give two different answers**.
 dequantisation of the same bytes. It needs a converted checkpoint, so it does not
 run in CI, and it is the first thing to reach for when the real model answers
 strangely.
+
+## WRX80 CUDA routing checkpoint (2026-10-05)
+
+WRX80 runs the existing GLM-5.3 Flash model from `/mnt/e/z-models/GLM-5.3-Flash-colibri-int4-g64`
+with a 32,768-token context and one KV slot. The CUDA build uses resident CUDA
+matrices, grouped clamped int4 routed experts for larger prefill batches, and the
+CPU path for routed groups below 32 rows. Transient routed-expert staging is
+bounded at 8 GiB by default. The source retains CPU fallback for unsupported
+formats, low free VRAM, and small decode batches.
+
+An initial 22-prompt-token request producing 7 tokens returned the exact text
+`WRX80_GLM_READY` over the Mac-to-WRX80 SSH tunnel. After service startup, the
+first request took 129.16 s end to end (109.62 s to first output); the immediate
+warm repeat took 7.43 s (5.48 s to first output). The previous run that sent
+small routed groups to CUDA took 10.40 s warm. An earlier CPU-routed run took
+7.15 s warm, so the current policy is close to the CPU-routed latency while still
+offloading the 176-row prefill group. Runtime logs confirmed that this request
+used a 64-expert/176-row CUDA group and kept the 8-row decode group on CPU.
+
+The service needed 2 min 51 s from restart to ready. During the surrounding
+inference checks WSL used about 57–62 GiB of 211 GiB, with no swap use; GPU memory
+was about 5.8 GiB of 24.6 GiB. A spot sample in the preceding CUDA-routed run
+showed about 9.5–14.2 CPU cores and 34–37% GPU SM utilization. These are short
+samples, not a sustained coding workload profile, and disk contention on E: was
+not directly instrumented. The currently tested prompt is only a connectivity
+and inference sanity check; ACP has not yet produced a file-read or tool-call
+event in the Tensor64 session.
+
+The clamped grouped CUDA kernel matched the CPU synthetic reference with a
+maximum absolute error of `4.18e-7`. The real-model check verifies a successful
+HTTP response and decode, not general model quality. Rerun a longer ACP coding
+task and collect sustained CPU, GPU, memory, and E: I/O measurements before
+changing the staging cap, row cutoff, or context setting.

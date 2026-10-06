@@ -94,6 +94,10 @@ def analyze_model(model):
         if isinstance(cached, dict) and cached.get("signature") == signature \
                 and isinstance(cached.get("analysis"), dict):
             analysis = cached["analysis"]
+            # The signature describes model contents, not its mount location.
+            # A model copied or moved to another drive can reuse this sidecar,
+            # but disk usage and SSD probes must use the path requested now.
+            analysis["path"] = str(model)
             # JSON object keys are always strings: restore the int layer
             # indices so a cache hit is identical to a fresh scan.
             by_layer = analysis.get("expert_bytes_by_layer")

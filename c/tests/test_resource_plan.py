@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -91,6 +92,16 @@ class ResourcePlanTest(unittest.TestCase):
         self.assertEqual(info["expert_bytes"], 120)
         self.assertEqual(info["expert_count"], 2)
         self.assertEqual(info["per_cap_bytes"], 60)
+
+    def test_cached_analysis_uses_current_path_after_model_move(self):
+        analyze_model(self.model)  # write the content-keyed sidecar at its source path
+        with tempfile.TemporaryDirectory() as directory:
+            moved = Path(directory) / "moved-model"
+            shutil.copytree(self.model, moved, copy_function=shutil.copy2)
+
+            info = analyze_model(moved)
+
+            self.assertEqual(info["path"], str(moved))
 
     def test_memory_available_is_positive(self):
         # Regression: on native Windows CPython, /proc/meminfo does not exist,

@@ -630,6 +630,19 @@ int main(int argc, char **argv) {
 #include "sparse_index.h"
 #include "vision_tower.h"
 
+#ifdef COLI_CUDA
+#include "backend_cuda.h"
+static int g_cuda_ready = 0;
+static int g_cuda_device = 0;
+static size_t g_cuda_expert_limit = (size_t)8 << 30;
+static int g_cuda_expert_min_rows = 32;
+static uint64_t g_cuda_moe_calls = 0;
+static uint64_t g_cuda_moe_rows = 0;
+static uint64_t g_cuda_moe_fallback = 0;
+static int g_cuda_moe_reported = 0;
+static int g_cuda_moe_small_reported = 0;
+#endif
+
 /* Una matrice residente, nel formato in cui conviene tenerla.
  *
  * Il checkpoint porta i densi in BF16 e gli esperti gia' in int4 gs64. Tenere
@@ -648,6 +661,7 @@ typedef struct {
     void *vk;                             /* ColiVkTensor*, caricata alla prima uso */
     int resident;                         /* eligible for persistent accelerator wrapping */
     void *metal;                          /* ColiMetalTensor*, created lazily */
+    void *cuda;                           /* ColiCudaTensor*, created lazily */
 } Mat;
 
 typedef struct {
@@ -970,6 +984,16 @@ static void mv(float *out, const Mat *w, const float *x) {
             return;
     }
 #endif
+#ifdef COLI_CUDA
+    if (g_cuda_ready && w->resident && (w->fmt == 1 || w->fmt == 4)) {
+        Mat *mutable_w = (Mat *)w;
+        const void *weights = w->fmt == 4 ? (const void *)w->q4 : (const void *)w->q8;
+        if (coli_cuda_matmul((ColiCudaTensor **)&mutable_w->cuda, out, x,
+                             weights, w->s, w->fmt, 1, w->columns, w->rows,
+                             g_cuda_device, w->gs))
+            return;
+    }
+#endif
 #ifdef COLI_VULKAN
     if (g_vk_ready && w->resident && (w->fmt == 1 || w->fmt == 4)) {
         Mat *mutable_w = (Mat *)w;
@@ -983,6 +1007,46 @@ static void mv(float *out, const Mat *w, const float *x) {
     case 4: matmul_i4_grouped(out, x, w->q4, w->s, 1, w->columns, w->rows, w->gs); break;
     case 1: matmul_q(out, x, w->q8, w->s, 1, w->columns, w->rows); break;
     default: matmul(out, x, w->f, 1, w->columns, w->rows); break;
+    }
+}
+
+/* Batch rows that share one resident matrix.  Besides reducing accelerator
+ * launch/transfer overhead, the CPU kernels reuse each output row's packed
+ * weights across the rows in this batch. */
+static void mv_batch(float *out, const Mat *w, const float *x, int rows) {
+    if (rows <= 0) return;
+#ifdef COLI_METAL
+    if (g_metal_ready && w->resident && (w->fmt == 1 || w->fmt == 4)) {
+        Mat *mutable_w = (Mat *)w;
+        if (coli_metal_matmul((ColiMetalTensor **)&mutable_w->metal, out, x,
+                              w->fmt == 4 ? (const void *)w->q4 : (const void *)w->q8,
+                              w->s, w->fmt, rows, w->columns, w->rows, w->gs))
+            return;
+    }
+#endif
+#ifdef COLI_CUDA
+    if (g_cuda_ready && w->resident && (w->fmt == 1 || w->fmt == 4)) {
+        Mat *mutable_w = (Mat *)w;
+        const void *weights = w->fmt == 4 ? (const void *)w->q4 : (const void *)w->q8;
+        if (coli_cuda_matmul((ColiCudaTensor **)&mutable_w->cuda, out, x,
+                             weights, w->s, w->fmt, rows, w->columns, w->rows,
+                             g_cuda_device, w->gs))
+            return;
+    }
+#endif
+#ifdef COLI_VULKAN
+    if (g_vk_ready && w->resident && (w->fmt == 1 || w->fmt == 4)) {
+        Mat *mutable_w = (Mat *)w;
+        if (coli_vk_matmul((ColiVkTensor **)&mutable_w->vk, out, x,
+                           w->fmt == 4 ? (const void *)w->q4 : (const void *)w->q8,
+                           w->s, w->fmt, rows, w->columns, w->rows, w->gs))
+            return;
+    }
+#endif
+    switch (w->fmt) {
+    case 4: matmul_i4_grouped(out, x, w->q4, w->s, rows, w->columns, w->rows, w->gs); break;
+    case 1: matmul_q(out, x, w->q8, w->s, rows, w->columns, w->rows); break;
+    default: matmul(out, x, w->f, rows, w->columns, w->rows); break;
     }
 }
 
@@ -1027,6 +1091,33 @@ static void mlp3(float *out, const float *x, const Mat *g, const Mat *u, const M
     mv(sg, g, x); mv(su, u, x);
     swiglu_clamped(sg, su, g->rows, limit);
     mv(out, d, sg);
+}
+
+#define GLM53_MOE_BATCH_ROWS 128
+
+static void mlp3_batch_with_scratch(float *out, const float *x, int rows,
+                                   const Mat *g, const Mat *u, const Mat *d,
+                                   float limit, float *sg, float *su) {
+    mv_batch(sg, g, x, rows);
+    mv_batch(su, u, x, rows);
+    swiglu_clamped(sg, su, rows * g->rows, limit);
+    mv_batch(out, d, sg, rows);
+}
+
+static void mlp3_batch(float *out, const float *x, int rows,
+                       const Mat *g, const Mat *u, const Mat *d, float limit) {
+    if (rows <= 0) return;
+    const int tile = rows < GLM53_MOE_BATCH_ROWS ? rows : GLM53_MOE_BATCH_ROWS;
+    float *sg = malloc((size_t)tile * g->rows * sizeof(float));
+    float *su = malloc((size_t)tile * u->rows * sizeof(float));
+    if (!sg || !su) { fprintf(stderr, "OOM allocating batched MLP scratch\n"); exit(1); }
+    for (int base = 0; base < rows; base += tile) {
+        int here = rows - base < tile ? rows - base : tile;
+        mlp3_batch_with_scratch(out + (size_t)base * d->rows,
+                                x + (size_t)base * g->columns, here,
+                                g, u, d, limit, sg, su);
+    }
+    free(su); free(sg);
 }
 
 /* ---------- KDA: proiezioni, gate, ricorrenza ---------- */
@@ -1215,6 +1306,32 @@ typedef struct {
     uint64_t used;
 } Slot;
 typedef struct LCache { Slot *s; int n, cap; } LCache;
+
+#ifdef COLI_CUDA
+static void cuda_expert_budget_init(void) {
+    const char *setting = getenv("COLI_CUDA_EXPERT_GB");
+    if (setting && *setting) {
+        char *end = NULL;
+        double gb = strtod(setting, &end);
+        if (end == setting || *end || !isfinite(gb) || gb < 0.0) {
+            fprintf(stderr, "[CUDA] ignoring invalid COLI_CUDA_EXPERT_GB=%s\n", setting);
+        } else {
+            if (gb > 20.0) gb = 20.0;
+            g_cuda_expert_limit = (size_t)(gb * (double)(1ull << 30));
+        }
+    }
+    setting = getenv("COLI_CUDA_EXPERT_MIN_ROWS");
+    if (setting && *setting) {
+        char *end = NULL;
+        long rows = strtol(setting, &end, 10);
+        if (end == setting || *end || rows < 0 || rows > 65536) {
+            fprintf(stderr, "[CUDA] ignoring invalid COLI_CUDA_EXPERT_MIN_ROWS=%s\n", setting);
+        } else {
+            g_cuda_expert_min_rows = (int)rows;
+        }
+    }
+}
+#endif
 
 /* Lunghezze e posizioni dei sei pezzi dentro allo slot. Gate e up sono
  * [moe_inter, hidden], down e' [hidden, moe_inter]: stessi byte, forme
@@ -1741,14 +1858,120 @@ static void expert_mats(const GModel *m, const Slot *slot, Mat *gate, Mat *up, M
     const int hidden = m->c.hidden, inter = m->c.moe_inter;
     const Mat shape[3] = {
         { 4, NULL, NULL, slot->piece[0], (const float *)slot->piece[1],
-          inter, hidden, 64, NULL, 0, NULL },
+          inter, hidden, 64, NULL, 0, NULL, NULL },
         { 4, NULL, NULL, slot->piece[2], (const float *)slot->piece[3],
-          inter, hidden, 64, NULL, 0, NULL },
+          inter, hidden, 64, NULL, 0, NULL, NULL },
         { 4, NULL, NULL, slot->piece[4], (const float *)slot->piece[5],
-          hidden, inter, 64, NULL, 0, NULL },
+          hidden, inter, 64, NULL, 0, NULL, NULL },
     };
     *gate = shape[0]; *up = shape[1]; *down = shape[2];
 }
+
+#ifdef COLI_CUDA
+/* Run one cache-sized routed-expert block on CUDA.  Work is tiled so a long
+ * prompt never needs a tokens*topk activation allocation. `cpu_from` is the
+ * first token not fully handled by CUDA, allowing a later CUDA refusal to fall
+ * back on CPU without repeating already scattered token rows. */
+static int cuda_moe_block(GModel *m, const LCache *cache, const int *slot_of,
+                          const int *union_ids, int base, int here,
+                          const int *chosen, const float *weight, int tokens,
+                          int topk, const float *x, float *out, int *cpu_from) {
+    *cpu_from = 0;
+    if (!g_cuda_ready || here < 1 || here > 64) return 0;
+    const int tile = tokens < GLM53_MOE_BATCH_ROWS ? tokens : GLM53_MOE_BATCH_ROWS;
+    const int max_rows = tile * topk;
+    const size_t group_bytes = m->e_slot * (size_t)here;
+    if (group_bytes > g_cuda_expert_limit) return 0;
+    size_t free_bytes = 0, total_bytes = 0;
+    if (!coli_cuda_mem_info(g_cuda_device, &free_bytes, &total_bytes) ||
+        free_bytes < group_bytes + ((size_t)512 << 20)) return 0;
+    const uint8_t **gate_w = calloc((size_t)here, sizeof(*gate_w));
+    const float **gate_s = calloc((size_t)here, sizeof(*gate_s));
+    const uint8_t **up_w = calloc((size_t)here, sizeof(*up_w));
+    const float **up_s = calloc((size_t)here, sizeof(*up_s));
+    const uint8_t **down_w = calloc((size_t)here, sizeof(*down_w));
+    const float **down_s = calloc((size_t)here, sizeof(*down_s));
+    int *rows = calloc((size_t)here, sizeof(*rows));
+    int *row_ids = malloc((size_t)max_rows * sizeof(*row_ids));
+    float *row_weights = malloc((size_t)max_rows * sizeof(*row_weights));
+    float *xg = malloc((size_t)max_rows * m->c.hidden * sizeof(*xg));
+    float *tmp = malloc((size_t)max_rows * m->c.hidden * sizeof(*tmp));
+    if (!gate_w || !gate_s || !up_w || !up_s || !down_w || !down_s ||
+        !rows || !row_ids || !row_weights || !xg || !tmp) {
+        fprintf(stderr, "OOM allocating CUDA MoE scratch\n"); exit(1);
+    }
+    int ok = 1;
+    for (int base_t = 0; base_t < tokens; base_t += tile) {
+        const int end_t = base_t + tile < tokens ? base_t + tile : tokens;
+        memset(rows, 0, (size_t)here * sizeof(*rows));
+        int groups = 0, R = 0;
+        for (int i = 0; i < here; i++) {
+            const int eid = union_ids[base + i];
+            const Slot *slot = &cache->s[slot_of[i]];
+            const int begin = R;
+            for (int t = base_t; t < end_t; t++) {
+                for (int k = 0; k < topk; k++) {
+                    if (chosen[(size_t)t * topk + k] != eid) continue;
+                    memcpy(xg + (size_t)R * m->c.hidden,
+                           x + (size_t)t * m->c.hidden,
+                           (size_t)m->c.hidden * sizeof(float));
+                    row_ids[R] = t;
+                    row_weights[R] = weight[(size_t)t * topk + k];
+                    R++;
+                    break;
+                }
+            }
+            if (R == begin) continue;
+            gate_w[groups] = slot->piece[0]; gate_s[groups] = (const float *)slot->piece[1];
+            up_w[groups] = slot->piece[2]; up_s[groups] = (const float *)slot->piece[3];
+            down_w[groups] = slot->piece[4]; down_s[groups] = (const float *)slot->piece[5];
+            rows[groups] = R - begin;
+            groups++;
+        }
+        if (groups && R < g_cuda_expert_min_rows) {
+            if (!g_cuda_moe_small_reported) {
+                fprintf(stderr, "[CUDA] small GLM expert groups stay on CPU "
+                                "(%d rows, CUDA minimum %d)\n",
+                        R, g_cuda_expert_min_rows);
+                g_cuda_moe_small_reported = 1;
+            }
+            ok = 0;
+            break;
+        }
+        if (groups && !coli_cuda_expert_group_host_clamped(
+                gate_w, gate_s, up_w, up_s, down_w, down_s, rows, groups,
+                m->c.hidden, m->c.moe_inter, 64, g_cuda_device,
+                tmp, xg, m->c.swiglu_limit)) {
+            ok = 0;
+            break;
+        }
+        if (groups) {
+            int off = 0;
+            for (int e = 0; e < groups; e++) {
+                for (int r = 0; r < rows[e]; r++) {
+                    const int pos = off + r;
+                    float *dst = out + (size_t)row_ids[pos] * m->c.hidden;
+                    const float *src = tmp + (size_t)pos * m->c.hidden;
+                    const float scale = row_weights[pos];
+                    for (int d = 0; d < m->c.hidden; d++) dst[d] += scale * src[d];
+                }
+                off += rows[e];
+            }
+            g_cuda_moe_calls++;
+            g_cuda_moe_rows += (uint64_t)R;
+            if (!g_cuda_moe_reported) {
+                fprintf(stderr, "[CUDA] GLM routed expert group active "
+                                "(%d experts, %d rows, clamped SwiGLU)\n", groups, R);
+                g_cuda_moe_reported = 1;
+            }
+        }
+        *cpu_from = end_t;
+    }
+    free(tmp); free(xg); free(row_weights); free(row_ids); free(rows);
+    free(down_s); free(down_w); free(up_s); free(up_w); free(gate_s); free(gate_w);
+    return ok;
+}
+#endif
 
 /* Il MoE, in due tempi.
  *
@@ -1766,12 +1989,7 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
     const int wide = c->dense_inter > c->moe_inter ? c->dense_inter : c->moe_inter;
 
     if (index < c->first_dense) {                 /* layer denso: nessun router */
-        float *sg = malloc((size_t)wide * sizeof(float));
-        float *su = malloc((size_t)wide * sizeof(float));
-        for (int t = 0; t < tokens; t++)
-            mlp3(out + (size_t)t * c->hidden, x + (size_t)t * c->hidden,
-                 &l->dg, &l->du, &l->dd, c->swiglu_limit, sg, su);
-        free(su); free(sg);
+        mlp3_batch(out, x, tokens, &l->dg, &l->du, &l->dd, c->swiglu_limit);
         return;
     }
 
@@ -1827,17 +2045,14 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
      * che non da' errore, da' numeri sbagliati. Quindi si lavora a blocchi
      * grandi al piu' quanto la cache: si legge il blocco in parallelo, si
      * applica a tutti i token, si passa al prossimo. */
-    float *sg = malloc((size_t)wide * sizeof(float));
-    float *su = malloc((size_t)wide * sizeof(float));
-    float *tmp = malloc((size_t)c->hidden * sizeof(float));
-    if (!sg || !su || !tmp) { fprintf(stderr, "OOM in MoE\n"); exit(1); }
-
     /* l'esperto condiviso e' sempre attivo e non passa dalla cache */
-    for (int t = 0; t < tokens; t++)
-        mlp3(out + (size_t)t * c->hidden, x + (size_t)t * c->hidden,
-             &l->rg, &l->ru, &l->rd, c->swiglu_limit, sg, su);
+    mlp3_batch(out, x, tokens, &l->rg, &l->ru, &l->rd, c->swiglu_limit);
 
     if (!m->streaming) {
+        float *sg = malloc((size_t)wide * sizeof(float));
+        float *su = malloc((size_t)wide * sizeof(float));
+        float *tmp = malloc((size_t)c->hidden * sizeof(float));
+        if (!sg || !su || !tmp) { fprintf(stderr, "OOM in MoE\n"); exit(1); }
         for (int t = 0; t < tokens; t++)
             for (int k = 0; k < topk; k++) {
                 const int eid = chosen[(size_t)t * topk + k];
@@ -1846,7 +2061,7 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
                 const float scale = weight[(size_t)t * topk + k];
                 float *dst = out + (size_t)t * c->hidden;
                 for (int d = 0; d < c->hidden; d++) dst[d] += scale * tmp[d];
-            }
+        }
         free(tmp); free(su); free(sg); free(weight); free(chosen);
         return;
     }
@@ -1958,32 +2173,65 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
             free(mds); free(mus); free(mgs); free(md); free(mu); free(mg);
         }
 #endif
-        if (!metal_done) {
-            /* CPU fallback: one expert at a time, then every token that chose it. */
+        int cpu_from = 0;
+#ifdef COLI_CUDA
+        if (!metal_done && g_cuda_ready) {
+            const int complete = cuda_moe_block(m, cache, slot_of, union_ids, base, here,
+                chosen, weight, tokens, topk, x, out, &cpu_from);
+            if (!complete) g_cuda_moe_fallback++;
+        }
+#endif
+        if (!metal_done && cpu_from < tokens) {
+            /* CPU fallback batches the selected rows per expert.  This avoids
+             * rebuilding three OpenMP teams for every token/expert pair and
+             * lets the packed weight rows stay hot across the batch. */
+            const int tile = tokens < GLM53_MOE_BATCH_ROWS ? tokens : GLM53_MOE_BATCH_ROWS;
+            float *xg = malloc((size_t)tile * c->hidden * sizeof(float));
+            float *tmp = malloc((size_t)tile * c->hidden * sizeof(float));
+            float *sg = malloc((size_t)tile * wide * sizeof(float));
+            float *su = malloc((size_t)tile * wide * sizeof(float));
+            int *row_ids = malloc((size_t)tile * sizeof(int));
+            float *row_weights = malloc((size_t)tile * sizeof(float));
+            if (!xg || !tmp || !sg || !su || !row_ids || !row_weights) {
+                fprintf(stderr, "OOM allocating batched MoE scratch\n"); exit(1);
+            }
             for (int i = 0; i < here; i++) {
                 const int eid = union_ids[base + i];
                 Slot *slot = &cache->s[slot_of[i]];
                 slot->used = ++m->clock;
                 Mat gate, up, down;
                 expert_mats(m, slot, &gate, &up, &down);
-                for (int t = 0; t < tokens; t++) {
-                    float scale = 0.0f;
-                    for (int k = 0; k < topk; k++)
-                        if (chosen[(size_t)t * topk + k] == eid) {
-                            scale = weight[(size_t)t * topk + k];
-                            break;
-                        }
-                    if (scale == 0.0f) continue;
-                    mlp3(tmp, x + (size_t)t * c->hidden, &gate, &up, &down,
-                         c->swiglu_limit, sg, su);
-                    float *dst = out + (size_t)t * c->hidden;
-                    for (int d = 0; d < c->hidden; d++) dst[d] += scale * tmp[d];
+            for (int base_t = cpu_from; base_t < tokens; base_t += tile) {
+                    const int end_t = base_t + tile < tokens ? base_t + tile : tokens;
+                    int nr = 0;
+                    for (int t = base_t; t < end_t; t++) {
+                        for (int k = 0; k < topk; k++)
+                            if (chosen[(size_t)t * topk + k] == eid) {
+                                memcpy(xg + (size_t)nr * c->hidden,
+                                       x + (size_t)t * c->hidden,
+                                       (size_t)c->hidden * sizeof(float));
+                                row_ids[nr] = t;
+                                row_weights[nr] = weight[(size_t)t * topk + k];
+                                nr++;
+                                break;
+                            }
+                    }
+                    if (!nr) continue;
+                    mlp3_batch_with_scratch(tmp, xg, nr, &gate, &up, &down,
+                                            c->swiglu_limit, sg, su);
+                    for (int r = 0; r < nr; r++) {
+                        float *dst = out + (size_t)row_ids[r] * c->hidden;
+                        const float *src = tmp + (size_t)r * c->hidden;
+                        const float scale = row_weights[r];
+                        for (int d = 0; d < c->hidden; d++) dst[d] += scale * src[d];
+                    }
                 }
             }
+            free(row_weights); free(row_ids); free(su); free(sg); free(tmp); free(xg);
         }
     }
     free(to_read); free(slot_of); free(union_ids);
-    free(tmp); free(su); free(sg); free(weight); free(chosen);
+    free(weight); free(chosen);
 }
 
 /* ---------- caricamento ---------- */
@@ -2167,6 +2415,30 @@ static void model_load_range(GModel *m, const char *dir, int layer_begin,
         fprintf(stderr, g_vk_ready
                 ? "Vulkan: active for resident matrices\n"
                 : "Vulkan: no usable device (%s), falling back to CPU\n", spv);
+    }
+#endif
+#ifdef COLI_CUDA
+    /* Runtime opt-in; GLM-5.3 CUDA starts with resident matrices only. */
+    if (getenv("COLI_CUDA") && atoi(getenv("COLI_CUDA"))) {
+        g_cuda_device = 0;
+        g_cuda_ready = coli_cuda_init(&g_cuda_device, 1);
+        if (g_cuda_ready) {
+            cuda_expert_budget_init();
+            size_t free_bytes = 0, total_bytes = 0;
+            if (coli_cuda_mem_info(g_cuda_device, &free_bytes, &total_bytes))
+                fprintf(stderr, "CUDA: active for resident and routed expert matrices on device %d "
+                                "(%zu MiB free / %zu MiB total)\n",
+                        g_cuda_device, free_bytes / (1024 * 1024),
+                        total_bytes / (1024 * 1024));
+            else
+                fprintf(stderr, "CUDA: active for resident and routed expert matrices on device %d\n",
+                        g_cuda_device);
+            fprintf(stderr, "CUDA: routed expert staging cap %.1f GiB, minimum group %d rows\n",
+                    (double)g_cuda_expert_limit / (double)(1ull << 30),
+                    g_cuda_expert_min_rows);
+        } else {
+            fprintf(stderr, "CUDA: no usable device, falling back to CPU\n");
+        }
     }
 #endif
     /* La cache si dimensiona qui, non prima: quanto si puo' spendere dipende
@@ -2385,6 +2657,9 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
  * una perdita per richiesta. Ogni allocazione fatta dal caricamento ha qui il
  * suo rilascio, l'indice dei tensori compreso. */
 static void mat_release(Mat *mat) {
+#ifdef COLI_CUDA
+    if (mat->cuda) coli_cuda_tensor_free((ColiCudaTensor *)mat->cuda);
+#endif
 #ifdef COLI_METAL
     if (mat->metal) coli_metal_tensor_free((ColiMetalTensor *)mat->metal);
 #endif
@@ -2462,6 +2737,12 @@ static void model_release(GModel *m) {
     free((void *)m->embed);
     free((void *)m->final_norm);
     st_destroy(&m->S);
+#ifdef COLI_CUDA
+    if (g_cuda_ready) {
+        coli_cuda_shutdown();
+        g_cuda_ready = 0;
+    }
+#endif
     memset(m, 0, sizeof(*m));
 }
 

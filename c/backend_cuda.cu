@@ -112,6 +112,8 @@ typedef struct {
     cudaStream_t stream;
     cudaEvent_t ev_done; int ev_done_ok;        /* resident-group issue completion (#431 PR-C0) */
     void *group_desc; size_t group_desc_cap;
+    void *glm_group_weights; size_t glm_group_weights_cap;
+    void *glm_group_scales; size_t glm_group_scales_cap;
     size_t tensor_count, tensor_bytes;
     int group_pending; size_t group_pending_bytes;   /* async expert-group in flight (Inc.4) */
 #ifdef COLI_ANS
@@ -910,7 +912,8 @@ __global__ static void grouped_down_w4(float *y,const float *x,const GroupDesc *
  * straddles a group). gs<=0 degrades to per-row (ng=1), so mixed fmt2/fmt4
  * groups run correctly through this one kernel family. */
 __global__ static void grouped_hidden_g4_dual(float *gate,float *up,const float *x,
-                                              const GroupDesc *desc,int I,int D){
+                                              const GroupDesc *desc,int I,int D,
+                                              float swiglu_limit){
     int o=blockIdx.x,s=blockIdx.y,c=blockIdx.z;GroupDesc d=desc[c];if(s>=d.rows)return;
     const uint8_t *gr=(const uint8_t*)d.g+(size_t)o*((D+1)/2);
     const uint8_t *ur=(const uint8_t*)d.u+(size_t)o*((D+1)/2);
@@ -928,6 +931,9 @@ __global__ static void grouped_hidden_g4_dual(float *gate,float *up,const float 
      * applied inside the accumulation, so silu runs on the raw sums) */
     if(!threadIdx.x){size_t z=(size_t)(d.offset+s)*I+o;
         float g=gp[0],u=upv[0];
+        if(swiglu_limit>0.f){if(g>swiglu_limit)g=swiglu_limit;
+            if(u < -swiglu_limit)u=-swiglu_limit;
+            else if(u > swiglu_limit)u=swiglu_limit;}
         gate[z]=(g/(1.0f+expf(-g)))*u;(void)up;}
 }
 __global__ static void grouped_down_g4(float *y,const float *x,const GroupDesc *desc,int D,int I){
@@ -1372,6 +1378,8 @@ extern "C" void coli_cuda_shutdown(void) {
         if (ctx->host_kv) cudaFreeHost(ctx->host_kv);
         if (ctx->stream) cudaStreamDestroy(ctx->stream);
         if (ctx->group_desc) cudaFree(ctx->group_desc);
+        if (ctx->glm_group_weights) cudaFree(ctx->glm_group_weights);
+        if (ctx->glm_group_scales) cudaFree(ctx->glm_group_scales);
 #ifdef COLI_ANS
         if(ctx->ans_copy_pending)cudaStreamSynchronize(ctx->stream);
         if(ctx->ans_host)cudaFreeHost(ctx->ans_host);
@@ -1395,6 +1403,8 @@ extern "C" void coli_cuda_shutdown(void) {
         ctx->aq_cap=ctx->al_cap=ctx->ar_cap=ctx->ac_cap=0;
         ctx->host_x_cap=ctx->host_y_cap=ctx->host_kv_cap=0;
         ctx->group_desc=nullptr; ctx->group_desc_cap=0;
+        ctx->glm_group_weights=nullptr; ctx->glm_group_weights_cap=0;
+        ctx->glm_group_scales=nullptr; ctx->glm_group_scales_cap=0;
     }
     g_nctx = 0;
     /* g_fp8_lut_ready is PROCESS-WIDE while the e4m3 table (c_e4m3, a
@@ -1990,7 +2000,7 @@ static int expert_group_impl(ColiCudaTensor *const *gates,
                              ColiCudaTensor *const *downs,
                              const int *rows, int count,
                              float *y, const float *x,
-                             int pin_small_batch) {
+                             int pin_small_batch, float swiglu_limit) {
     if (fault_injected()) return 0;
     if (!gates || !ups || !downs || !rows || !x || !y || count < 1) return 0;
     ColiCudaTensor *first=gates[0];
@@ -2015,6 +2025,10 @@ static int expert_group_impl(ColiCudaTensor *const *gates,
         all_f8&=g->fmt==8&&u->fmt==8&&d->fmt==8;
         total+=rows[c]; if(rows[c]>max_rows) max_rows=rows[c];
     }
+    /* GLM-5.3 clamps the gate and up activations before SwiGLU.  Only the
+     * grouped int4 path below implements that exact epilogue; other formats
+     * must decline so the caller can use its reference CPU implementation. */
+    if(swiglu_limit>0.f && !(all_q4 && any_g4)) return 0;
     /* Mixed E8/FP8 groups cannot use a homogeneous grouped kernel. */
     if((any_e8&&!all_e8)||(any_f8&&!all_f8)){
         int off=0;
@@ -2028,6 +2042,10 @@ static int expert_group_impl(ColiCudaTensor *const *gates,
         return 1;
     }
     DeviceContext *ctx=find_ctx(device); if(!select_ctx(ctx)) return 0;
+    /* GLM lazily uploads selected experts immediately before this call.
+     * Upload converts packed nibbles on the legacy stream; wait once before
+     * the non-blocking grouped stream consumes those weights. */
+    if(swiglu_limit>0.f && !cuda_ok(cudaDeviceSynchronize(),"clamped expert upload synchronize")) return 0;
     if(!prepare_group_weights(ctx,gates,ups,downs,count,host)) return 0;
     size_t xb=(size_t)total*D*sizeof(float), ib=(size_t)total*I*sizeof(float);
     if(!reserve(&ctx->x,&ctx->x_cap,xb)||!reserve(&ctx->y,&ctx->y_cap,xb)||
@@ -2137,7 +2155,7 @@ static int expert_group_impl(ColiCudaTensor *const *gates,
         /* grouped-int4 (fmt=4) present: per-group scales (#334). fmt=2 members
          * ride along as the ng=1 special case. silu fused in the dual epilogue. */
         dim3 hg((unsigned)I,(unsigned)max_rows,(unsigned)count),og((unsigned)D,(unsigned)max_rows,(unsigned)count);
-        grouped_hidden_g4_dual<<<hg,256,0,ctx->stream>>>(ctx->gate,ctx->up,ctx->x,dev,I,D);
+        grouped_hidden_g4_dual<<<hg,256,0,ctx->stream>>>(ctx->gate,ctx->up,ctx->x,dev,I,D,swiglu_limit);
         grouped_down_g4<<<og,256,0,ctx->stream>>>(ctx->y,ctx->gate,dev,D,I);
     }else{
         /* generic path decodes fmt 0/1/2/3 only — refuse everything else rather
@@ -2190,7 +2208,7 @@ extern "C" int coli_cuda_expert_group(ColiCudaTensor *const *gates,
                                         ColiCudaTensor *const *downs,
                                         const int *rows, int count,
                                         float *y, const float *x) {
-    return expert_group_impl(gates,ups,downs,rows,count,y,x,0);
+    return expert_group_impl(gates,ups,downs,rows,count,y,x,0,0.f);
 }
 
 extern "C" int coli_cuda_expert_group_pinned(ColiCudaTensor *const *gates,
@@ -2199,7 +2217,90 @@ extern "C" int coli_cuda_expert_group_pinned(ColiCudaTensor *const *gates,
                                                const int *rows, int count,
                                                float *y, const float *x,
                                                int pin_small_batch) {
-    return expert_group_impl(gates,ups,downs,rows,count,y,x,pin_small_batch);
+    return expert_group_impl(gates,ups,downs,rows,count,y,x,pin_small_batch,0.f);
+}
+
+extern "C" int coli_cuda_expert_group_clamped(ColiCudaTensor *const *gates,
+                                               ColiCudaTensor *const *ups,
+                                               ColiCudaTensor *const *downs,
+                                               const int *rows, int count,
+                                               float *y, const float *x,
+                                               float swiglu_limit) {
+    if (!(swiglu_limit > 0.f) || !std::isfinite(swiglu_limit)) return 0;
+    return expert_group_impl(gates,ups,downs,rows,count,y,x,0,swiglu_limit);
+}
+
+/* GLM-5.3 streams routed int4 experts through host memory.  This variant
+ * stages one selected block into reusable device scratch, avoiding one
+ * cudaMalloc/cudaFree pair per expert tensor while keeping host slot bytes
+ * untouched for the CPU fallback. */
+extern "C" int coli_cuda_expert_group_host_clamped(
+        const uint8_t *const *gate_w,const float *const *gate_s,
+        const uint8_t *const *up_w,const float *const *up_s,
+        const uint8_t *const *down_w,const float *const *down_s,
+        const int *rows,int count,int D,int I,int gs,int device,
+        float *y,const float *x,float swiglu_limit){
+    if(fault_injected()||!gate_w||!gate_s||!up_w||!up_s||!down_w||!down_s||
+       !rows||!y||!x||count<1||count>64||D<1||I<1||gs<2||(gs&1)||
+       !(swiglu_limit>0.f)||!std::isfinite(swiglu_limit))return 0;
+    DeviceContext *ctx=find_ctx(device);if(!select_ctx(ctx))return 0;
+    size_t total_rows=0,weight_bytes=0,scale_bytes=0;
+    const size_t g_rb=((size_t)D+1)/2,d_rb=((size_t)I+1)/2;
+    const size_t g_ng=((size_t)D+gs-1)/gs,d_ng=((size_t)I+gs-1)/gs;
+    const size_t one_g=(size_t)I*g_rb,one_d=(size_t)D*d_rb;
+    const size_t one_gs=(size_t)I*g_ng*sizeof(float),one_ds=(size_t)D*d_ng*sizeof(float);
+    if(one_g>SIZE_MAX/2||one_d>SIZE_MAX||one_gs>SIZE_MAX/2||one_ds>SIZE_MAX)return 0;
+    for(int c=0;c<count;c++){
+        if(!gate_w[c]||!gate_s[c]||!up_w[c]||!up_s[c]||!down_w[c]||!down_s[c]||rows[c]<1)return 0;
+        total_rows+=(size_t)rows[c];
+        weight_bytes+=2*one_g+one_d;
+        scale_bytes+=2*one_gs+one_ds;
+    }
+    const size_t activation_width=((size_t)2*D+(size_t)2*I)*sizeof(float);
+    if(total_rows>SIZE_MAX/activation_width)return 0;
+    const size_t activation_bytes=total_rows*activation_width;
+    size_t free_bytes=0,total_bytes=0;
+    const size_t reserve=(size_t)512<<20;
+    if(!coli_cuda_mem_info(device,&free_bytes,&total_bytes)||
+       free_bytes<weight_bytes+scale_bytes+activation_bytes+reserve)return 0;
+    if(!reserve_bytes(&ctx->glm_group_weights,&ctx->glm_group_weights_cap,weight_bytes)||
+       !reserve_bytes(&ctx->glm_group_scales,&ctx->glm_group_scales_cap,scale_bytes))return 0;
+
+    ColiCudaTensor tg[64]={},tu[64]={},td[64]={};
+    uint8_t *dw=(uint8_t*)ctx->glm_group_weights;
+    float *ds=(float*)ctx->glm_group_scales;
+    size_t wo=0,so=0;
+    for(int c=0;c<count;c++){
+        tg[c].weights=dw+wo;tg[c].scales=ds+so;tg[c].fmt=4;tg[c].I=D;tg[c].O=I;
+        tg[c].gs=gs;tg[c].ng=(int)g_ng;tg[c].device=device;tg[c].weight_bytes=one_g;
+        tu[c].weights=dw+wo+one_g;tu[c].scales=ds+so+one_gs/sizeof(float);
+        tu[c].fmt=4;tu[c].I=D;tu[c].O=I;tu[c].gs=gs;tu[c].ng=(int)g_ng;
+        tu[c].device=device;tu[c].weight_bytes=one_g;
+        td[c].weights=dw+wo+2*one_g;td[c].scales=ds+so+2*one_gs/sizeof(float);
+        td[c].fmt=4;td[c].I=I;td[c].O=D;td[c].gs=gs;td[c].ng=(int)d_ng;
+        td[c].device=device;td[c].weight_bytes=one_d;
+        if(!cuda_ok(cudaMemcpyAsync(dw+wo,gate_w[c],one_g,cudaMemcpyHostToDevice,ctx->stream),"GLM gate upload")||
+           !cuda_ok(cudaMemcpyAsync(dw+wo+one_g,up_w[c],one_g,cudaMemcpyHostToDevice,ctx->stream),"GLM up upload")||
+           !cuda_ok(cudaMemcpyAsync(dw+wo+2*one_g,down_w[c],one_d,cudaMemcpyHostToDevice,ctx->stream),"GLM down upload")||
+           !cuda_ok(cudaMemcpyAsync(ds+so,gate_s[c],one_gs,cudaMemcpyHostToDevice,ctx->stream),"GLM gate scales upload")||
+           !cuda_ok(cudaMemcpyAsync(ds+so+one_gs/sizeof(float),up_s[c],one_gs,cudaMemcpyHostToDevice,ctx->stream),"GLM up scales upload")||
+           !cuda_ok(cudaMemcpyAsync(ds+so+2*one_gs/sizeof(float),down_s[c],one_ds,cudaMemcpyHostToDevice,ctx->stream),"GLM down scales upload")){
+            (void)cudaStreamSynchronize(ctx->stream);
+            return 0;
+        }
+        wo+=2*one_g+one_d;
+        so+=2*one_gs/sizeof(float)+one_ds/sizeof(float);
+    }
+    offset_to_signed_s4<<<(unsigned)((weight_bytes+255)/256),256,0,ctx->stream>>>(dw,weight_bytes);
+    if(!cuda_ok(cudaGetLastError(),"GLM expert nibble conversion")){
+        (void)cudaStreamSynchronize(ctx->stream);
+        return 0;
+    }
+    ColiCudaTensor *gp[64],*up[64],*dp[64];
+    for(int c=0;c<count;c++){gp[c]=&tg[c];up[c]=&tu[c];dp[c]=&td[c];}
+    int ok=expert_group_impl(gp,up,dp,rows,count,y,x,0,swiglu_limit);
+    if(!ok) (void)cudaStreamSynchronize(ctx->stream);
+    return ok;
 }
 
 /* ---- Async expert group (Inc.4): issue/take split of coli_cuda_expert_group ----
@@ -2292,7 +2393,7 @@ extern "C" int coli_cuda_expert_group_issue(ColiCudaTensor *const *gates,
         /* silu is fused in the dual kernel's epilogue (like the sync path):
          * an extra silu_mul here would re-apply it against the never-written
          * ctx->up buffer. */
-        grouped_hidden_g4_dual<<<hg,256,0,ctx->stream>>>(ctx->gate,ctx->up,ctx->x,dev,I,D);
+        grouped_hidden_g4_dual<<<hg,256,0,ctx->stream>>>(ctx->gate,ctx->up,ctx->x,dev,I,D,0.f);
         grouped_down_g4<<<og,256,0,ctx->stream>>>(ctx->y,ctx->gate,dev,D,I);
     } else {
         /* Fallback runs quant_matmul with gs=0,ng=1 — per-row-scale semantics.
