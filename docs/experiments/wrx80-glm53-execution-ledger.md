@@ -111,6 +111,7 @@ Completed checkpoints:
 - `6484e9e4` returns a complete device FFN branch only when **all selected routed experts are resident**, then threads that D-row into FFN-site device mHC post using a non-aliasing output scratch slot. CPU/CUDA-linked GLM builds pass; any nonresident selection returns `NULL` and stays on the unchanged host path.
 - `f4b59e62` adds rolling S=1 hot-tier coverage telemetry: sparse decode-site sets entering device-row qualification versus sets where every selected routed expert is resident. CPU/CUDA-linked GLM builds pass; the next safe deployment will report `resident_coverage ... pct=...` and decide whether to grow/reorder residency or prioritize streamed-device accumulation.
 - `7ec30f01` preserves a successfully verified device residual across the **layer boundary**, allowing the next layer's attention mHC-pre to consume it directly. Any host-only site or GPU-post failure clears residency immediately, preventing stale scratch reuse. CPU/CUDA-linked GLM builds pass.
+- `4e3cd6e2` adds rolling **cross-layer residency continuity** telemetry: device mHC-pre site entries versus entries that consumed an already-resident residual. The next verification run will report `chain_residency resident_in=... pre_sites=... pct=...`; CPU and CUDA-linked builds pass.
 
 Work:
 - deploy verification mode at the next safe restart and measure real router/chain drift, VRAM high-water, all-resident decode coverage, and cross-layer `resident_in=1` continuity;
@@ -200,6 +201,9 @@ Exit:
 - long S=1 generation is stable and materially faster than the generic path.
 
 ### U70 — Native Windows production-model qualification
+
+Full-model staging note: the Mac Pro -> WRX80 transfer of `GLM-5.3-colibri-int4-g64` completed successfully on 2026-10-06 (`RSYNC_RC=0`, source total **420.43 GB**) into `E:\\z-models\\GLM-5.3-colibri-int4-g64`; no Internet redownload is required for the later native/full-model qualification.
+
 **Class:** S on host, implementation support otherwise complete
 **Depends on:** current WSL baseline run reaching safe stop
 **Status:** READY FOR FULL-MODEL A/B
