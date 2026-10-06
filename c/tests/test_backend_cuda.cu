@@ -540,6 +540,52 @@ int main(int argc, char **argv) {
     coli_cuda_tensor_free(opt);
     coli_cuda_tensor_free(avt);
 
+    /* Device-resident mHC post: preserve the CPU source-stream summation order
+     * for each destination/column and add the branch through post[]. */
+    {
+        constexpr int HC=3, HD=5;
+        float residual[HC*HD]={
+            .1f,.2f,.3f,.4f,.5f,
+            -.2f,.4f,-.6f,.8f,-1.f,
+            1.1f,-1.2f,1.3f,-1.4f,1.5f
+        };
+        float branch[HD]={.25f,-.5f,.75f,-1.f,1.25f};
+        float post[HC]={.5f,-.25f,.75f};
+        float comb[HC*HC]={
+            .6f,.1f,.3f,
+            .2f,.7f,.1f,
+            .4f,.2f,.4f
+        };
+        float href[HC*HD], hgot[HC*HD];
+        for(int dst=0;dst<HC;dst++)for(int col=0;col<HD;col++){
+            float v=0.f;
+            for(int src=0;src<HC;src++)
+                v += comb[src*HC+dst]*residual[src*HD+col];
+            href[dst*HD+col]=v+post[dst]*branch[col];
+        }
+        float *rd=(float*)coli_cuda_pipe_alloc(d0,sizeof(residual));
+        float *bd=(float*)coli_cuda_pipe_alloc(d0,sizeof(branch));
+        float *pd=(float*)coli_cuda_pipe_alloc(d0,sizeof(post));
+        float *cd=(float*)coli_cuda_pipe_alloc(d0,sizeof(comb));
+        float *od=(float*)coli_cuda_pipe_alloc(d0,sizeof(hgot));
+        if(!rd||!bd||!pd||!cd||!od||
+           !coli_cuda_pipe_upload(d0,rd,residual,sizeof(residual))||
+           !coli_cuda_pipe_upload(d0,bd,branch,sizeof(branch))||
+           !coli_cuda_pipe_upload(d0,pd,post,sizeof(post))||
+           !coli_cuda_pipe_upload(d0,cd,comb,sizeof(comb))||
+           !coli_cuda_pipe_hc_post(d0,od,bd,rd,pd,cd,HC,HD)||
+           !coli_cuda_pipe_download(d0,od,hgot,sizeof(hgot))||
+           !close_enough(hgot,href,HC*HD)){
+            std::fprintf(stderr,"CUDA hyperconnection post mismatch\n");
+            return 1;
+        }
+        coli_cuda_pipe_free(d0,od);
+        coli_cuda_pipe_free(d0,cd);
+        coli_cuda_pipe_free(d0,pd);
+        coli_cuda_pipe_free(d0,bd);
+        coli_cuda_pipe_free(d0,rd);
+    }
+
     /* Native s4 WMMA path: compare the quantized-activation result against the
        existing FP32-activation/s4-weight grouped implementation. */
     uint8_t w4[32*32/2]; float ws4[32], gx4[64], scalar4[64], async4[64], tensor4[64], pinned4[64], clamped4[64], resident4[64];

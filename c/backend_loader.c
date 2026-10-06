@@ -140,6 +140,7 @@ typedef int (*fn_pipe_copy2d)(int device,float *dst,int dpitch,const float *src,
 typedef int (*fn_pipe_download)(int device,const void *src,void *dst,size_t bytes);
 typedef void (*fn_pipe_free)(int device,void *p);
 typedef int (*fn_pipe_gemm)(ColiCudaTensor *t,float *y_dev,const float *x_dev,int S);
+typedef int (*fn_pipe_hc_post)(int device,float *out_dev,const float *branch_dev,const float *residual_dev,const float *post_dev,const float *comb_dev,int hc,int D);
 typedef int (*fn_pipe_peer_copy)(int dst_dev,float *dst,int src_dev, const float *src,size_t bytes);
 typedef int (*fn_pipe_rmsnorm)(int device,float *y_dev,const float *x_dev, const float *w_dev,int S,int D,float eps);
 typedef int (*fn_pipe_rmsnorm_s)(int device,float *y_dev,const float *x_dev, const float *w_dev,int S,int D,float eps, int xstride,int ystride);
@@ -217,6 +218,7 @@ static struct {
     fn_pipe_download pipe_download;
     fn_pipe_free pipe_free;
     fn_pipe_gemm pipe_gemm;
+    fn_pipe_hc_post pipe_hc_post;
     fn_pipe_peer_copy pipe_peer_copy;
     fn_pipe_rmsnorm pipe_rmsnorm;
     fn_pipe_rmsnorm_s pipe_rmsnorm_s;
@@ -1485,6 +1487,7 @@ static int coli_cuda_load(void){
     RESOLVE(pipe_download, fn_pipe_download)
     RESOLVE(pipe_free, fn_pipe_free)
     RESOLVE(pipe_gemm, fn_pipe_gemm)
+    RESOLVE(pipe_hc_post, fn_pipe_hc_post)
     RESOLVE(pipe_peer_copy, fn_pipe_peer_copy)
     RESOLVE(pipe_rmsnorm, fn_pipe_rmsnorm)
     RESOLVE(pipe_rmsnorm_s, fn_pipe_rmsnorm_s)
@@ -1841,6 +1844,12 @@ void coli_cuda_pipe_free(int device,void *p){
 int coli_cuda_pipe_gemm(ColiCudaTensor *t,float *y_dev,const float *x_dev,int S){
     if(!g_cuda.available){ return 0; }
     return g_cuda.pipe_gemm(t, y_dev, x_dev, S);
+}
+
+int coli_cuda_pipe_hc_post(int device,float *out_dev,const float *branch_dev,
+        const float *residual_dev,const float *post_dev,const float *comb_dev,int hc,int D){
+    if(!g_cuda.available || !g_cuda.pipe_hc_post){ return 0; }
+    return g_cuda.pipe_hc_post(device,out_dev,branch_dev,residual_dev,post_dev,comb_dev,hc,D);
 }
 
 int coli_cuda_pipe_peer_copy(int dst_dev,float *dst,int src_dev, const float *src,size_t bytes){

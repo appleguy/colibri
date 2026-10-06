@@ -3001,6 +3001,23 @@ __global__ static void pipe_add_n(float *x,const float *t,size_t n){
     if(i<n) x[i]+=t[i];
 }
 
+/* Hyperconnection post on resident device data. Each output element is owned
+ * by one thread and sums source streams in the same order as coli_hc_post(). */
+__global__ static void pipe_hc_post_kernel(float *out,const float *branch,
+                                           const float *residual,const float *post,
+                                           const float *comb,int hc,int D){
+    size_t i=(size_t)blockIdx.x*blockDim.x+threadIdx.x;
+    size_t n=(size_t)hc*D;
+    if(i>=n)return;
+    int dst=(int)(i/(size_t)D);
+    int col=(int)(i%(size_t)D);
+    float value=0.f;
+    for(int src=0;src<hc;src++)
+        value += comb[(size_t)src*hc+dst] * residual[(size_t)src*D+col];
+    value += post[dst] * branch[col];
+    out[i]=value;
+}
+
 /* Fixed-order partial merge: block b adds partial row b into x row rows[b].
  * Target rows are unique by construction (CPU pre-sums per token), so no
  * atomics — the 9.20.7 lesson. */
@@ -3321,6 +3338,18 @@ extern "C" int coli_cuda_pipe_add(int device,float *x_dev,const float *t_dev,siz
     DeviceContext *ctx=find_ctx(device); if(!n||!select_ctx(ctx)) return 0;
     pipe_add_n<<<(unsigned)((n+255)/256),256>>>(x_dev,t_dev,n);
     return cuda_ok(cudaGetLastError(),"pipe add");
+}
+extern "C" int coli_cuda_pipe_hc_post(int device,float *out_dev,
+        const float *branch_dev,const float *residual_dev,
+        const float *post_dev,const float *comb_dev,int hc,int D){
+    if (fault_injected()) return 0;
+    DeviceContext *ctx=find_ctx(device);
+    if(!out_dev||!branch_dev||!residual_dev||!post_dev||!comb_dev||
+       hc<1||hc>8||D<1||!select_ctx(ctx)) return 0;
+    size_t n=(size_t)hc*D;
+    pipe_hc_post_kernel<<<(unsigned)((n+255)/256),256>>>(
+        out_dev,branch_dev,residual_dev,post_dev,comb_dev,hc,D);
+    return cuda_ok(cudaGetLastError(),"pipe hyperconnection post");
 }
 extern "C" int coli_cuda_pipe_rows_add(int device,float *x_dev,const float *partial_dev,
                                        const int *rows_dev,int nrows,int D){

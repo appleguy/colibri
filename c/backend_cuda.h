@@ -315,6 +315,9 @@ COLI_CUDA_DLLEXPORT int coli_cuda_pipe_rope(int device,float *v_dev,const int *p
                         int stride,int offset,int R,int heads,float theta);
 COLI_CUDA_DLLEXPORT int coli_cuda_pipe_silu_mul(int device,float *gate_dev,const float *up_dev,size_t n);
 COLI_CUDA_DLLEXPORT int coli_cuda_pipe_add(int device,float *x_dev,const float *t_dev,size_t n);
+COLI_CUDA_DLLEXPORT int coli_cuda_pipe_hc_post(int device,float *out_dev,
+        const float *branch_dev,const float *residual_dev,
+        const float *post_dev,const float *comb_dev,int hc,int D);
 COLI_CUDA_DLLEXPORT int coli_cuda_pipe_rows_add(int device,float *x_dev,const float *partial_dev,
                             const int *rows_dev,int nrows,int D);
 COLI_CUDA_DLLEXPORT int coli_cuda_pipe_gemm(ColiCudaTensor *t,float *y_dev,const float *x_dev,int S);
