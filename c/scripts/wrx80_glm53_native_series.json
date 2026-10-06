@@ -1,0 +1,71 @@
+{
+  "repo": "E:\\z-src\\colibri-native",
+  "model": "E:\\z-models\\GLM-5.3-Flash-colibri-int4-g64",
+  "results_root": "E:\\z-results\\glm53-native-2026-10-06",
+  "sample_interval_ms": 250,
+  "prompt_unit": "Analyze this deterministic systems-programming trace. Track ownership, synchronization, memory movement, cache residency, latency, throughput, and correctness. Explain interactions precisely. ",
+  "prompt_repeat": 20,
+  "prompt_chars": 3400,
+  "base_env": {
+    "OMP_NUM_THREADS": "16",
+    "COLI_CUDA": "1",
+    "COLI_CUDA_RESIDENT_EXPERT_GB": "18",
+    "COLI_CUDA_RESIDENT_RESERVE_GB": "3",
+    "GLM53_PREWARM_EXPERTS": "1",
+    "GLM53_EXPERT_GB": "175",
+    "GLM53_PROFILE_VRAM": "1",
+    "GLM53_PROF_EVERY": "1",
+    "PROF": "1"
+  },
+  "runs": [
+    {
+      "name": "b3-router1-indexer1-chain0-g8",
+      "enabled": true,
+      "greedy": 8,
+      "env": {
+        "COLI_CUDA_GLM53_CHAIN": "0",
+        "COLI_CUDA_GLM53_ROUTER": "1",
+        "COLI_CUDA_GLM53_INDEXER": "1"
+      },
+      "precondition_file": "E:\\z-results\\glm53-native-2026-10-06\\b2-router1-indexer2-chain0-g8.log",
+      "precondition_require": [
+        "decode 8 token",
+        "indexer verify q=.*idx_match=1"
+      ],
+      "precondition_forbid": [
+        "mismatch=[1-9]",
+        "failed=[1-9]"
+      ],
+      "require": [
+        "decode 8 token",
+        "indexer authoritative q=.*ok=1"
+      ],
+      "forbid": [
+        "fallback=[1-9]",
+        "CUDA error",
+        "engine_error"
+      ],
+      "stop_on_failure": true
+    },
+    {
+      "name": "b3-repeat-router1-indexer1-chain0-g8",
+      "enabled": true,
+      "greedy": 8,
+      "env": {
+        "COLI_CUDA_GLM53_CHAIN": "0",
+        "COLI_CUDA_GLM53_ROUTER": "1",
+        "COLI_CUDA_GLM53_INDEXER": "1"
+      },
+      "require": [
+        "decode 8 token",
+        "indexer authoritative q=.*ok=1"
+      ],
+      "forbid": [
+        "fallback=[1-9]",
+        "CUDA error",
+        "engine_error"
+      ],
+      "stop_on_failure": true
+    }
+  ]
+}
