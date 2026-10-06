@@ -104,3 +104,12 @@ Living checkpoint log for the dedicated WRX80 / RTX 4090 host. Keep entries smal
 - Commit `60401bd` adds startup resident-matrix prewarm before CUDA expert placement, so the same requested 21 GB tier self-clamps against true remaining VRAM rather than guessed future headroom. The same commit also contained a concurrent compatible host-expert-cache prewarm implementation.
 - Host expert prewarm is enabled for the next run. It fills the already-sized RAM cache from routing history after VRAM placement, while preserving runtime miss/byte telemetry.
 - Historical repeated service restarts around 01:36-01:37 were delayed completions of earlier blocking systemctl restart commands; no persistent restart helper remained afterward.
+
+
+## 2026-10-06 01:41 PDT — dense-first 21 GB placement result
+
+- Resident-matrix prewarm uploaded 552 ordinary resident matrices first, consuming 4.33 GiB VRAM and leaving 18.12 GiB free.
+- With the requested expert budget still set to 21 GB and reserve 3 GB, hot-expert placement then self-clamped safely at 1,158 experts / 15.27 GiB persistent expert VRAM.
+- Combined startup allocation was about 20.7 GiB, leaving 2.86 GiB free by Colibri accounting (about 3.47 GB free reported by nvidia-smi at the observation point).
+- This fixes the earlier expert-first behavior where lazy dense uploads later drove free VRAM to about 20 MiB. Keep the aggressive 21 GB request; dense-first ordering now determines the true safe admitted expert tier automatically.
+- Host expert-cache prewarm began after VRAM placement; while active it showed p9_client_rpc waits against /mnt/e, growing RSS, fixed VRAM, and zero swap.
