@@ -24,11 +24,15 @@ function Assert-Preconditions($Run) {
       Start-Sleep -Seconds 10
     }
     $text = Get-Content $Run.precondition_file -Raw
-    foreach ($pattern in @($Run.precondition_require)) {
-      if ($text -notmatch $pattern) { throw "precondition failed: required pattern not found: $pattern" }
+    if ($Run.precondition_require) {
+      foreach ($pattern in @($Run.precondition_require)) {
+        if ($text -notmatch $pattern) { throw "precondition failed: required pattern not found: $pattern" }
+      }
     }
-    foreach ($pattern in @($Run.precondition_forbid)) {
-      if ($text -match $pattern) { throw "precondition failed: forbidden pattern found: $pattern" }
+    if ($Run.precondition_forbid) {
+      foreach ($pattern in @($Run.precondition_forbid)) {
+        if ($text -match $pattern) { throw "precondition failed: forbidden pattern found: $pattern" }
+      }
     }
   }
 }
