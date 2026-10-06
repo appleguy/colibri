@@ -445,3 +445,13 @@ U01 is cleared. ACTIVE next unit: U10.1, prepare the first real CHAIN=1 short A/
 - Guard script: `c/scripts/wrx80_glm53_u10_attribution_guard.ps1`.
 - Guard requires: frozen usage hashes intact, no Windows `glm53`, no WSL `glm53`, and >= 22,000 MiB reported free VRAM before launching the paired attribution manifest.
 - Current guard result is expected BLOCKED on WSL PID 219975; no attribution files were mutated by the failed preflight.
+
+
+### U10.3b armed handoff checkpoint
+
+- WSL `glm53` PID `219975` is confirmed active and making progress: over an 8 s sample it advanced CPU time materially and reported ~640% CPU.
+- Preserve that workload. Do not kill/reset WSL or Hyper-V to free VRAM.
+- One-shot handoff script: `E:\\z-results\\glm53-native-2026-10-06\\u10-attribution\\resume_after_wsl.ps1`.
+- Handoff process PID: `6316`.
+- It waits for WSL PID 219975 to exit, then invokes the committed attribution guard, which revalidates frozen usage hashes, absence of Windows/WSL glm53, and >=22,000 MiB free VRAM before launching the paired CHAIN=0/CHAIN=1 run.
+- Do not start another U10.3b marshal while PID 6316 is active.

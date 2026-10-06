@@ -645,3 +645,8 @@ Prepared a paired exact-source CHAIN=0/CHAIN=1 attribution manifest at commit 0e
 ### U10.3b blocked by active WSL inference
 
 The paired frozen-history attribution is ready but not launched. WSL GLM-5.3 Flash PID 219975 is actively using ~21.4 GiB VRAM via Hyper-V worker PID 22296. A committed preflight guard now prevents U10 attribution from starting until both Windows/WSL glm53 are absent, frozen usage hashes still match, and >=22 GiB VRAM is free.
+
+
+### U10.3b handoff armed
+
+WSL GLM-5.3 Flash PID 219975 is still useful active inference (~640% CPU in the latest sample). A one-shot handoff process, PID 6316, now waits for that exact process to exit and then invokes the committed guarded attribution launcher. This preserves the active workload while making U10.3b self-advancing without a race.
