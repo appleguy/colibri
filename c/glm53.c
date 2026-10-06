@@ -2580,6 +2580,32 @@ static int cuda_resident_moe(GModel *m, int layer,
     return ok;
 }
 
+static int cuda_shared_moe_verify_dev(GModel *m, GLayer *l,
+        const float *x_dev, float *out_host) {
+    if (!m || !l || !x_dev || !out_host || !g_cuda_ready ||
+        !cuda_mat_ensure(&l->rg) || !cuda_mat_ensure(&l->ru) ||
+        !cuda_mat_ensure(&l->rd))
+        return 0;
+
+    ColiCudaTensor *gate[1] = { (ColiCudaTensor *)l->rg.cuda };
+    ColiCudaTensor *up[1] = { (ColiCudaTensor *)l->ru.cuda };
+    ColiCudaTensor *down[1] = { (ColiCudaTensor *)l->rd.cuda };
+    const float one[1] = { 1.0f };
+    const size_t row_b = (size_t)m->c.hidden * sizeof(float);
+    float *slot_dev = coli_cuda_pipe_scratch(g_cuda_device, 19, row_b);
+    float *acc_dev = coli_cuda_pipe_scratch(g_cuda_device, 20, row_b);
+    int devices[1] = { g_cuda_device };
+    if (!slot_dev || !acc_dev ||
+        !coli_cuda_expert_group_resident_issue_clamped(
+            gate, up, down, one, 1, g_cuda_device, x_dev, slot_dev,
+            m->c.swiglu_limit) ||
+        !coli_cuda_expert_group_resident_take(
+            g_cuda_device, devices, 1, slot_dev, acc_dev, m->c.hidden) ||
+        !coli_cuda_pipe_download(g_cuda_device, acc_dev, out_host, row_b))
+        return 0;
+    return 1;
+}
+
 static int cuda_resident_moe_verify_dev(GModel *m, int layer,
         const int *chosen, const float *weight, int topk,
         const float *x_dev, float *out_host) {
@@ -2837,6 +2863,30 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
     const double shared_t0 = profile_enabled() ? now_s() : 0.0;
     mlp3_batch(out, x, tokens, &l->rg, &l->ru, &l->rd, c->swiglu_limit);
     if (shared_t0) m->t_moe_shared += now_s() - shared_t0;
+#ifdef COLI_CUDA
+    if (tokens == 1 && x_dev && cuda_chain_mode() == 2) {
+        float *shared_dev = malloc((size_t)c->hidden * sizeof(float));
+        if (!shared_dev) { fprintf(stderr, "OOM allocating shared expert verification row\n"); exit(1); }
+        if (cuda_shared_moe_verify_dev(m, (GLayer *)l, x_dev, shared_dev)) {
+            float max_abs = 0.0f, max_rel = 0.0f;
+            for (int q = 0; q < c->hidden; q++) {
+                const float da = fabsf(shared_dev[q] - out[q]);
+                const float dr = da / (fabsf(out[q]) + 1e-6f);
+                if (da > max_abs) max_abs = da;
+                if (dr > max_rel) max_rel = dr;
+            }
+            static int shared_verify_reports = 0;
+            if (shared_verify_reports < 16) {
+                fprintf(stderr,
+                        "[CUDA] GLM53 shared expert dev-row verify layer=%d "
+                        "max_abs=%.6g max_rel=%.6g\n",
+                        index, max_abs, max_rel);
+                shared_verify_reports++;
+            }
+        }
+        free(shared_dev);
+    }
+#endif
 
     if (!m->streaming) {
         float *sg = malloc((size_t)wide * sizeof(float));
