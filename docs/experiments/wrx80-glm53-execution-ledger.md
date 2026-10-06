@@ -229,8 +229,15 @@ Full-model staging note: the Mac Pro -> WRX80 transfer of `GLM-5.3-colibri-int4-
 
 **Class:** S on host, implementation support otherwise complete
 **Depends on:** current WSL baseline run reaching safe stop
-**Status:** READY FOR FULL-MODEL A/B
+**Status:** CURRENT NATIVE BUILD/ABI/NUMERICS PASS; FULL-MODEL A/B NEXT
 **Priority:** P0 platform experiment
+
+Current-branch qualification checkpoint:
+- `8c7e262d` was fast-forwarded into the clean native checkout at `E:\z-src\colibri-native`; `coli_cuda.dll` rebuilt for `sm_89` and `glm53.exe CUDA_DLL=1 ARCH=native` rebuilt successfully.
+- Native Windows `LoaderStubFixtureTest`: 12/12 pass; ABI remains 58 mandatory + 9 optional.
+- Native Windows `backend_cuda_test.exe`: RTX 4090 q8/q4/q2/f32/e8 correctness passes, including the expected deliberate OOM diagnostic.
+- `objdump -p coli_cuda.dll` confirms exports for `coli_cuda_sparse_index_select_decode`, `coli_cuda_attention_absorbed_sparse_project_batch_dev_out`, and `coli_cuda_pipe_hc_post`.
+- No new WSL model inference was launched during this qualification.
 
 Why first:
 - no second 195 GB model copy is needed;
