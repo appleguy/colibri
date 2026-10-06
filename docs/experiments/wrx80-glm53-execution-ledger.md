@@ -640,3 +640,8 @@ Exact-source global CHAIN=1 completed cleanly at 1.170 tok/s (8 tokens / 6.8 s),
 ### U10.3a frozen-history attribution fixture
 
 Prepared a paired exact-source CHAIN=0/CHAIN=1 attribution manifest at commit 0e046f4. Both runs start from byte-identical private COLI_USAGE files cloned from frozen seed SHA-256 47A50E117F6E3CC5DDC1EC490081006F3F33FD97CBD058C8D222B5BE7CACD6BA, so expert-history mutation cannot confound the comparison. Fair residency remains disabled.
+
+
+### U10.3b blocked by active WSL inference
+
+The paired frozen-history attribution is ready but not launched. WSL GLM-5.3 Flash PID 219975 is actively using ~21.4 GiB VRAM via Hyper-V worker PID 22296. A committed preflight guard now prevents U10 attribution from starting until both Windows/WSL glm53 are absent, frozen usage hashes still match, and >=22 GiB VRAM is free.

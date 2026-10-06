@@ -434,3 +434,14 @@ U01 is cleared. ACTIVE next unit: U10.1, prepare the first real CHAIN=1 short A/
 - All three files are 148,122 bytes with SHA-256 47A50E117F6E3CC5DDC1EC490081006F3F33FD97CBD058C8D222B5BE7CACD6BA.
 - Both enabled runs use global residency, ATTN=1, ROUTER=1, INDEXER=1, sparse profiling off, identical prompt/decode settings, and differ only in CHAIN=0 vs CHAIN=1 plus their private COLI_USAGE copy.
 - The shared model .coli_usage file is not used by this attribution pair.
+
+
+### U10.3b live blocker checkpoint
+
+- Attribution pair is prepared but intentionally not launched.
+- Live blocker: WSL `glm53` PID `219975` under Colibri server PID `219961`, actively consuming ~21.4 GiB dedicated VRAM and substantial CPU.
+- Windows WDDM owner is Hyper-V worker `vmwp.exe` PID `22296`, which is why host `nvidia-smi` cannot attribute the allocation directly to a CUDA process.
+- Do not kill or reset this workload. Preserve it as useful active inference.
+- Guard script: `c/scripts/wrx80_glm53_u10_attribution_guard.ps1`.
+- Guard requires: frozen usage hashes intact, no Windows `glm53`, no WSL `glm53`, and >= 22,000 MiB reported free VRAM before launching the paired attribution manifest.
+- Current guard result is expected BLOCKED on WSL PID 219975; no attribution files were mutated by the failed preflight.
