@@ -749,6 +749,7 @@ typedef struct {
      * vuoti su Flash perche' il motore non emetteva nulla). Tempi di fase
      * cumulativi dall'avvio; il turno ne prende la differenza. */
     double t_attn, t_ffn, t_disk, t_head;
+    double t_indexer, t_router;           /* subphase attribution; included in attn/ffn */
     uint64_t forwards;
     uint8_t **ehit;                       /* [layer][expert] toccato in questo turno */
     /* torre vision: presente solo se il checkpoint la porta */
@@ -756,6 +757,8 @@ typedef struct {
     ColiVisionTower vision;
     ColiVisionBlock *vblocks;
 } GModel;
+
+static double now_s(void);
 
 static const float *load_f32(GModel *m, const char *fmt, ...) {
     char name[512];
@@ -1199,8 +1202,9 @@ static void kda_layer(const Cfg *c, const GLayer *l, const float *x, int tokens,
 }
 
 /* ---------- MLA + indexer con k-pool ---------- */
-static void mla_layer(const Cfg *c, const GLayer *l, const float *x, int tokens,
+static void mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
                       float *out, GLayerState *st, int base) {
+    const Cfg *c = &m->c;
     const int H = c->n_heads, QK = c->qk_nope, V = c->v_head;
     const int IH = c->index_nh, ID = c->index_hd;
     const int seen = base + tokens;
@@ -1233,6 +1237,7 @@ static void mla_layer(const Cfg *c, const GLayer *l, const float *x, int tokens,
                     queries + ((size_t)t * H + h) * QK, h * L, L);
         /* indexer: le query vengono dal q_a normalizzato, le chiavi dall'hidden
          * con LayerNorm (con bias), e i pesi per testa sono scalati da IH^-0.5 */
+        const double index_t0 = getenv("PROF") ? now_s() : 0.0;
         mv(iq + (size_t)t * IH * ID, &l->iwq, qn);
         float *kraw = ik + (size_t)at * ID;
         mv(kraw, &l->iwk, row);
@@ -1240,15 +1245,18 @@ static void mla_layer(const Cfg *c, const GLayer *l, const float *x, int tokens,
         mv(gates + (size_t)at * ID, &l->ikpg, row);
         mv(head_w + (size_t)t * IH, &l->iwp, row);
         for (int h = 0; h < IH; h++) head_w[(size_t)t * IH + h] /= sqrtf((float)IH);
+        if (index_t0) m->t_indexer += now_s() - index_t0;
     }
 
     const int width = coli_sparse_index_width(c->index_topk, c->index_kpool, c->index_kpool_tail);
     int *selected = malloc((size_t)tokens * width * sizeof(int));
+    const double select_t0 = getenv("PROF") ? now_s() : 0.0;
     if (coli_sparse_index_select_range(selected, iq, ik, gates, head_w, l->ikpa, valid,
                                        seen, IH, ID, c->index_kpool, c->index_topk,
                                        c->index_kpool_tail, base, seen)) {
         fprintf(stderr, "indexer selection failed\n"); exit(1);
     }
+    if (select_t0) m->t_indexer += now_s() - select_t0;
     /* GLM53_DUMP_INDEX=1 stampa le righe scelte dall'indexer: e' il primo
      * posto da guardare quando il motore diverge solo su certe lunghezze. */
     if (getenv("GLM53_DUMP_INDEX")) {
@@ -1949,7 +1957,6 @@ static void expert_read(GModel *m, int layer, int eid, Slot *slot) {
 
 /* Lo slot dell'esperto chiesto, letto se non c'e'. La vittima e' quella usata
  * meno di recente. */
-static double now_s(void);
 static void ehit_mark(GModel *m, int layer, int eid);
 static void hits_emit(GModel *m);
 static void emap_emit(GModel *m);
@@ -2494,6 +2501,7 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
     if (!chosen || !weight || !score) { fprintf(stderr, "OOM in router\n"); exit(1); }
 
     /* --- primo tempo: il router, per ogni token --- */
+    const double router_t0 = getenv("PROF") ? now_s() : 0.0;
     for (int t = 0; t < tokens; t++) {
         const float *row = x + (size_t)t * c->hidden;
         for (int e = 0; e < c->n_experts; e++) {
@@ -2528,6 +2536,7 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
         rt_route(index, t, mine, mine_w, topk);
     }
     rt_trace_end();
+    if (router_t0) m->t_router += now_s() - router_t0;
     free(score);
 
     /* --- secondo e terzo tempo, a blocchi che stanno in cache ---
@@ -3143,7 +3152,7 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                 /* Lo stato non si azzera a ogni chiamata: e' della
                  * conversazione, e azzerarlo qui vorrebbe dire ricominciare
                  * la ricorrenza a ogni token generato. */
-                if (c->is_full[i]) mla_layer(c, l, normed, n, branch, st, start);
+                if (c->is_full[i]) mla_layer(m, l, normed, n, branch, st, start);
                 else kda_layer(c, l, normed, n, branch, st->kda_state, st->kda_window,
                                s->kda_scratch);
             } else {
@@ -3388,9 +3397,9 @@ static float *forward_span(GModel *m, GSession *s, const int *tokens, int n,
         const long every = pe && *pe ? strtol(pe, NULL, 10) : 0;
         if (every > 0 && (m->forwards % (uint64_t)every) == 0)
             fprintf(stderr,
-                    "[PROF] GLM53 rolling forwards=%llu attn=%.3f ffn=%.3f disk=%.3f head=%.3f\n",
+                    "[PROF] GLM53 rolling forwards=%llu attn=%.3f indexer=%.3f ffn=%.3f router=%.3f disk=%.3f head=%.3f\n",
                     (unsigned long long)m->forwards,
-                    m->t_attn, m->t_ffn, m->t_disk, m->t_head);
+                    m->t_attn, m->t_indexer, m->t_ffn, m->t_router, m->t_disk, m->t_head);
     }
 
     free(normed); free(collapsed);
