@@ -56,12 +56,15 @@ a safe stop/finish.
 
 Goal: make the remaining attention/expert wall time directly attributable.
 
+Completed checkpoints:
+- `151c0897` adds cumulative **indexer** and **router** subphase timers to GLM-5.3 and emits them in the rolling `[PROF]` line without changing the existing serve `PROF` wire contract. CPU engine build and CUDA backend correctness test pass; deployment waits for the next safe service restart.
+- `5985dd95` adds opt-in `GLM53_PROFILE_VRAM=1` sampling after attention/FFN boundaries, outside the phase timers, and reports cumulative peak-used/min-free VRAM. CPU and CUDA-linked GLM-5.3 builds pass; deployment likewise waits for a safe restart.
+- `6c02e1b2` splits MoE execution into cumulative **shared expert**, **persistent-resident GPU**, **streamed GPU**, and **CPU routed fallback** timers. The profiling flag is cached once so disabled instrumentation does not repeatedly call `getenv` in hot loops. CPU and CUDA-linked builds pass.
+
 Work:
-- split expert FFN into resident-GPU, streamed-GPU, CPU matmul, host-cache read/wait,
-  synchronization, and accumulation buckets;
-- add explicit router/indexer timing;
 - add H2D/D2H byte + time counters by phase;
-- record GPU memory high-water and largest transient allocation per request;
+- separate synchronization/accumulation overhead where it remains material after the new MoE timers;
+- record the **largest transient allocation** per request in addition to sampled VRAM high-water;
 - preserve exact commit/environment with each benchmark.
 
 Exit:
