@@ -86,20 +86,20 @@ Implemented:
 Validated:
 - 1 GB bring-up: 70 experts / ~0.92 GiB, resident hits, zero fallbacks.
 - 12 GB: 847 experts / 11.17 GiB.
-- 21 GB request: placement admitted **1,483 experts / 19.55 GiB persistent expert VRAM**.
-- lazy dense/MLA allocations later drove total use to roughly **24,123 / 24,564 MiB** without immediate CUDA failure.
-- point utilization reached 95% at near-full occupancy.
+- expert-first 21 GB stress run admitted **1,483 experts / 19.55 GiB persistent expert VRAM**, but later lazy dense/MLA allocations drove total use to roughly **24,123 / 24,564 MiB**. It survived long enough to complete multiple forwards and reached a 95% SM-utilization point sample, but ~20 MiB free is not a robust steady-state margin.
+- commit `60401bd` changed startup ordering to prewarm ordinary resident CUDA matrices before expert placement.
+- dense-first 21 GB qualification uploaded **552 ordinary resident matrices / 4.33 GiB** first, then safely admitted **1,158 experts / 15.27 GiB**. Colibri reported ~2.86 GiB free after placement (nvidia-smi ~3.47 GB at observation time).
+- the requested resident budget remains 21 GB; the live guard now self-clamps against the true dense-first residual capacity.
 
 Known deficiency:
-- current placement reserve is checked before each expert admission, but does not model all later lazy dense/attention/workspace allocations. Startup can stop at a nominal 3 GiB free and later consume nearly all of it.
+- dense-first ordering fixes the largest previously hidden allocation, but the final reserve is still a fixed policy rather than a measured transient/workspace model. Later attention/expert scratch and allocator fragmentation should be characterized before intentionally shrinking the safety margin toward the 23+ GiB total-use goal.
 
 Next implementation:
 - transient-aware residency planner:
-  - pre-initialize or measure all lazy resident matrices first;
-  - track largest attention/expert scratch allocations;
+  - track largest attention/expert scratch allocations after dense-first prewarm;
   - include allocator/fragmentation margin;
   - admit experts against **predicted steady-state high-water**, not only current free VRAM.
-- target the highest stable occupancy, ideally 23–24 GiB total, rather than enforcing a fixed 3 GiB idle reserve.
+- experimentally reduce the remaining reserve only after long-run evidence; target the highest stable occupancy, ideally 23–24 GiB total.
 
 Exit criterion:
 - repeated long prefill + decode workloads complete without allocation failures, corruption, or performance collapse at the chosen near-full VRAM target.
@@ -114,7 +114,7 @@ Implemented / configured:
 - `GLM53_PREWARM_EXPERTS=1`;
 - `GLM53_EXPERT_GB=175`;
 - parallel expert-cache prewarm;
-- resident VRAM experts are skipped when filling limited host-cache slots.
+- commit `039cd68` avoids duplicate host prewarm for every VRAM-resident expert even when the host cache could otherwise hold the full layer; CUDA failure can still lazily load the host fallback.
 
 Observed problem:
 - model lives at `/mnt/e/z-models/...`, a WSL drvfs/9p mount.
