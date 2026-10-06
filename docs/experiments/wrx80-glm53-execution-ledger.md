@@ -103,8 +103,10 @@ Completed checkpoints:
 - `ba391c9a` makes the **device-normalized `D` row** the explicit host FFN boundary in verification mode. CPU mHC-pre/RMSNorm remains the oracle, but downstream FFN consumes the downloaded device-normalized row instead of depending on the full host residual bank. CPU and CUDA-linked GLM builds plus the CUDA backend suite pass.
 - `723e1b73` lets the S=1 CUDA router consume that already-resident normalized device row directly, skipping its hidden-row H2D upload. Router mode 2 still keeps CPU selection/weights authoritative and now reports `dev_in=1` when the transfer-free input is used. CPU/CUDA-linked builds and CUDA backend correctness pass.
 - `ae41b638` adds a verification-only S=1 **resident routed-MoE from device row** path using the existing resident expert issue/take backend. It snapshots the current resident-tier host result as oracle, recomputes the same selected resident experts directly from `x_dev`, downloads one D-row contribution, and reports max absolute/relative drift. CPU/CUDA-linked builds and CUDA backend correctness pass.
+- `9bee6c1f` adds `coli_cuda_pipe_swiglu_clamped`, matching GLM-5.3's asymmetric SwiGLU contract exactly: positive-only gate clamp, symmetric up clamp, then SiLU(gate)×up. CUDA numerical parity, Linux loader/header parity, and native-Windows ABI (`57 mandatory + 9 optional`) all pass. This is the prerequisite for moving the always-on shared expert onto the resident device row without changing model math.
 
 Work:
+- verify the shared expert directly from the resident normalized device row, then make it authoritative only after real-run parity;
 - once real-run parity is clean, make the device-row resident routed-expert contribution authoritative and avoid its host activation staging;
 - preserve residual stream across layer boundaries;
 - replace broad synchronizations with dependency-local synchronization.
