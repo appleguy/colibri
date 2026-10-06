@@ -560,3 +560,17 @@ Queued fair-policy repeat `g2r-fair-attn1-router1-indexer1-chain0-g8` completed 
 - peak CUDA used 22,641.5 MiB, minimum free 1,922 MiB.
 
 This repeat is only ~0.6% above frozen G1 at 1.299 tok/s, so the first G2 result at 1.332 tok/s was partly favorable run variance. The structural residency improvement remains real: fair admission keeps 27..28 experts/layer and ~15.9% worst-layer historical coverage versus the global policy's ~2.4% floor. Keep fair admission as promising but not yet a decisive wall-clock winner until the queued global control repeat and sparse-profile arms complete.
+
+
+### Full GLM-5.3 comparative benchmark lane — 2026-10-06
+
+A native-Windows comparison lane is now defined for the full `GLM-5.3-colibri-int4-g64` checkpoint. The full model is a supported `glm_moe_dsa` family in this engine, not a Flash-only compatibility hack. Colibri analysis reports ~419.3 GB model bytes, ~407.7 GB routed-expert bytes, 75 expert layers, 256 routed experts/layer, hidden size 6144, and 78 transformer layers.
+
+The comparison matrix is `c/scripts/wrx80_glm53_full_comparison.json`. It holds the hardware/software budget constant (`CHAIN=0`, `ATTN=1`, `ROUTER=1`, `INDEXER=1`, 18 GB resident-expert target, 3 GB reserve, 175 GB host expert budget) and runs:
+- fresh Flash fair-residency 8-token control;
+- full-model 1-token compatibility smoke with global residency;
+- full-model 8-token global-residency short benchmark;
+- full-model 8-token fair-residency short benchmark;
+- disabled ~32k-character medium-context full-model benchmark, enabled only after the short lane passes.
+
+The first run is gated on `E:\\z-results\\glm53-native-2026-10-06\\chain2-requal-approved.txt` containing `PASS`, so full-model work cannot overtake CHAIN=2 correctness requalification.
