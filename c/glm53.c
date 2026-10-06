@@ -751,6 +751,7 @@ typedef struct {
      * cumulativi dall'avvio; il turno ne prende la differenza. */
     double t_attn, t_ffn, t_disk, t_head;
     double t_indexer, t_router;           /* subphase attribution; included in attn/ffn */
+    double t_moe_shared, t_moe_resident, t_moe_streamed, t_moe_cpu;
     uint64_t forwards;
     uint8_t **ehit;                       /* [layer][expert] toccato in questo turno */
     /* torre vision: presente solo se il checkpoint la porta */
@@ -760,6 +761,12 @@ typedef struct {
 } GModel;
 
 static double now_s(void);
+
+static int profile_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) enabled = getenv("PROF") != NULL;
+    return enabled;
+}
 
 static void profile_vram_sample(GModel *m) {
 #ifdef COLI_CUDA
@@ -1257,7 +1264,7 @@ static void mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
                     queries + ((size_t)t * H + h) * QK, h * L, L);
         /* indexer: le query vengono dal q_a normalizzato, le chiavi dall'hidden
          * con LayerNorm (con bias), e i pesi per testa sono scalati da IH^-0.5 */
-        const double index_t0 = getenv("PROF") ? now_s() : 0.0;
+        const double index_t0 = profile_enabled() ? now_s() : 0.0;
         mv(iq + (size_t)t * IH * ID, &l->iwq, qn);
         float *kraw = ik + (size_t)at * ID;
         mv(kraw, &l->iwk, row);
@@ -1270,7 +1277,7 @@ static void mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
 
     const int width = coli_sparse_index_width(c->index_topk, c->index_kpool, c->index_kpool_tail);
     int *selected = malloc((size_t)tokens * width * sizeof(int));
-    const double select_t0 = getenv("PROF") ? now_s() : 0.0;
+    const double select_t0 = profile_enabled() ? now_s() : 0.0;
     if (coli_sparse_index_select_range(selected, iq, ik, gates, head_w, l->ikpa, valid,
                                        seen, IH, ID, c->index_kpool, c->index_topk,
                                        c->index_kpool_tail, base, seen)) {
@@ -2310,6 +2317,7 @@ static int cuda_resident_moe(GModel *m, int layer,
     }
     if (!nres) return 0;
 
+    const double resident_wall0 = profile_enabled() ? now_s() : 0.0;
     int ok = 1;
     uint64_t served_rows = 0, calls = 0;
     for (int base = 0; base < nres && ok; base += 64) {
@@ -2389,6 +2397,7 @@ static int cuda_resident_moe(GModel *m, int layer,
     } else {
         m->gpu_expert_fallback++;
     }
+    if (resident_wall0) m->t_moe_resident += now_s() - resident_wall0;
 
     return ok;
 }
@@ -2521,7 +2530,7 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
     if (!chosen || !weight || !score) { fprintf(stderr, "OOM in router\n"); exit(1); }
 
     /* --- primo tempo: il router, per ogni token --- */
-    const double router_t0 = getenv("PROF") ? now_s() : 0.0;
+    const double router_t0 = profile_enabled() ? now_s() : 0.0;
     for (int t = 0; t < tokens; t++) {
         const float *row = x + (size_t)t * c->hidden;
         for (int e = 0; e < c->n_experts; e++) {
@@ -2569,7 +2578,9 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
      * grandi al piu' quanto la cache: si legge il blocco in parallelo, si
      * applica a tutti i token, si passa al prossimo. */
     /* l'esperto condiviso e' sempre attivo e non passa dalla cache */
+    const double shared_t0 = profile_enabled() ? now_s() : 0.0;
     mlp3_batch(out, x, tokens, &l->rg, &l->ru, &l->rd, c->swiglu_limit);
+    if (shared_t0) m->t_moe_shared += now_s() - shared_t0;
 
     if (!m->streaming) {
         float *sg = malloc((size_t)wide * sizeof(float));
@@ -2718,12 +2729,15 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
         int cpu_from = 0;
 #ifdef COLI_CUDA
         if (!metal_done && g_cuda_ready) {
+            const double streamed_t0 = profile_enabled() ? now_s() : 0.0;
             const int complete = cuda_moe_block(m, cache, slot_of, union_ids, base, here,
                 chosen, weight, tokens, topk, x, out, &cpu_from);
+            if (streamed_t0) m->t_moe_streamed += now_s() - streamed_t0;
             if (!complete) g_cuda_moe_fallback++;
         }
 #endif
         if (!metal_done && cpu_from < tokens) {
+            const double cpu_t0 = profile_enabled() ? now_s() : 0.0;
             /* CPU fallback batches the selected rows per expert.  This avoids
              * rebuilding three OpenMP teams for every token/expert pair and
              * lets the packed weight rows stay hot across the batch. */
@@ -2770,6 +2784,7 @@ static void ffn_layer(GModel *m, const GLayer *l, int index, const float *x,
                 }
             }
             free(row_weights); free(row_ids); free(su); free(sg); free(tmp); free(xg);
+            if (cpu_t0) m->t_moe_cpu += now_s() - cpu_t0;
         }
     }
     free(to_read); free(slot_of); free(union_ids);
@@ -3423,6 +3438,10 @@ static float *forward_span(GModel *m, GSession *s, const int *tokens, int n,
                     "[PROF] GLM53 rolling forwards=%llu attn=%.3f indexer=%.3f ffn=%.3f router=%.3f disk=%.3f head=%.3f\n",
                     (unsigned long long)m->forwards,
                     m->t_attn, m->t_indexer, m->t_ffn, m->t_router, m->t_disk, m->t_head);
+        if (every > 0 && (m->forwards % (uint64_t)every) == 0)
+            fprintf(stderr,
+                    "[PROF] GLM53 moe shared=%.3f resident_gpu=%.3f streamed_gpu=%.3f cpu=%.3f\n",
+                    m->t_moe_shared, m->t_moe_resident, m->t_moe_streamed, m->t_moe_cpu);
 #ifdef COLI_CUDA
         if (every > 0 && (m->forwards % (uint64_t)every) == 0 && m->gpu_vram_total)
             fprintf(stderr,
