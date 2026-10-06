@@ -452,3 +452,11 @@ Resume the WRX80 native-Windows GLM-5.3 plan from `docs/experiments/wrx80-glm53-
 - The next run is the missing native ordinary GPU-attention arm: `CHAIN=0`, `ATTN=1`, `ROUTER=1`, `INDEXER=1`, fair residency OFF.
 - `CHAIN=1` is not yet an effective production chain because device mHC pre/RMSNorm site entry is still restricted to mode 2; mode 1 therefore never reaches `chain_ready`. Promoting that already-qualified S=1 site-entry path is now an explicit correctness/performance unit before the real resident-chain A/B.
 - `fce27ad` adds opt-in fair resident admission, default-off, validated by CPU/CUDA-linked builds and the RTX backend suite.
+
+
+## Incremental benchmark / chain-promotion sequence — 2026-10-06 13:30 local
+
+1. G1 remains the frozen ordinary native GPU-attention baseline: CHAIN=0, ATTN=1, ROUTER=1, INDEXER=1, global residency; 8-token result 1.299 tok/s.
+2. G2 is active with the same binary/workload and only COLI_CUDA_RESIDENT_LAYER_FAIR=1. A queued local series will then run fair repeat, global control repeat, global sparse-profile, and fair sparse-profile.
+3. CHAIN=1 promotion will be split into two correctness units. First, allow S=1 mode 1 to execute device site-entry/pre, GPU branch, and device hc-post, but download the final H*D residual bank to host after each successful site. This keeps all current CPU projections/fallback state coherent while making the chain genuinely authoritative. Only after that A/B passes will cross-site/layer residual readback removal be attempted.
+4. `c/scripts/wrx80_glm53_future_benchmarks.json` now contains disabled gated jobs for CHAIN=2 qualification, CHAIN=1 global/fair short A/B, ~5k-token medium context, and ~20k-token long context. Do not enable later gates before their prerequisite correctness gate passes.
