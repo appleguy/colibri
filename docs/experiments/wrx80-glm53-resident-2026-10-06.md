@@ -113,3 +113,18 @@ Living checkpoint log for the dedicated WRX80 / RTX 4090 host. Keep entries smal
 - Combined startup allocation was about 20.7 GiB, leaving 2.86 GiB free by Colibri accounting (about 3.47 GB free reported by nvidia-smi at the observation point).
 - This fixes the earlier expert-first behavior where lazy dense uploads later drove free VRAM to about 20 MiB. Keep the aggressive 21 GB request; dense-first ordering now determines the true safe admitted expert tier automatically.
 - Host expert-cache prewarm began after VRAM placement; while active it showed p9_client_rpc waits against /mnt/e, growing RSS, fixed VRAM, and zero swap.
+
+
+## 2026-10-06 01:47 PDT — full host-cache + dense-first 21 GB benchmark
+
+- Aggressive host configuration: `GLM53_PREWARM_EXPERTS=1`, `GLM53_EXPERT_GB=175`, requested `COLI_CUDA_RESIDENT_EXPERT_GB=21`, reserve 3 GB, sparse MLA mode 1.
+- Startup resident-matrix prewarm: 552 matrices, 4.33 GiB VRAM.
+- Expert placement then safely self-clamped to 1,158 hot experts / 15.27 GiB persistent expert VRAM. Total GPU use stabilized around 20.73 GiB with about 3.41 GiB free by nvidia-smi.
+- Full host prewarm completed all 12,096 sparse expert slots: 171.2 GB loaded in 373.2 s. WSL remained swap-free with roughly 68 GiB available afterward.
+- Fixed workload: 551 prompt tokens, 8 completion tokens. Server profile wall time 115.831 s over 12 forwards.
+- Cumulative phases: attention 36.027 s, FFN/expert matmul 75.544 s, expert disk 0.079 s, LM head 1.191 s.
+- First forward: attention 8.174 s, FFN 17.239 s, disk 0.014 s, head 0.290 s. The prior non-prewarmed 21 GB stress first forward was attention 16.247 s, FFN 182.439 s, disk 165.843 s, head 2.761 s.
+- Subsequent decode forwards after prefill settled near roughly 0.32-0.36 s total each; rolling counters from forwards 6-12 showed attention increments about 0.078-0.081 s and FFN increments about 0.155-0.181 s.
+- CUDA MLA: 132 attempts, 132 success, 0 fallback, 1.999 s cumulative GPU wall.
+- Persistent hot tier: 468 grouped calls, 34,473 routed rows, 4,287 expert hits, 56.52 GiB expert-weight H2D avoided, 1.865 s resident GPU wall, 0 fallbacks.
+- Runtime expert disk is effectively eliminated. Remaining performance work should target FFN/device-pipeline continuity and attention/host synchronization, not storage.
