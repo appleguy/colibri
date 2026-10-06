@@ -397,3 +397,12 @@ U01 is cleared. ACTIVE next unit: U10.1, prepare the first real CHAIN=1 short A/
 - c/scripts/wrx80_glm53_u10_chain1_ab.json defines global CHAIN=1 enabled and fair CHAIN=1 disabled, with CHAIN=1 / ATTN=1 / ROUTER=1 / INDEXER=1 and sparse profiling disabled.
 - Manifest commit: 50c6f60 (glm53-add-u10-chain1-ab-manifest).
 - A full-model comparison glm53 process became active before U10.2 launch. Preserve it and defer CHAIN=1 execution until the GPU is free.
+
+
+### U10.2 launch serialization checkpoint
+
+- The full-model comparison marshal is PID `500`; current model child PID was `9432` when queued.
+- U10.2 is serialized behind the full comparison via `E:\\z-results\\glm53-native-2026-10-06\\u10-chain1\\queue_u10_after_full.ps1`.
+- Queue process PID: `23868`.
+- The queue waits for PID 500 to exit, then waits for no remaining `glm53` process, then launches only the manifest `c/scripts/wrx80_glm53_u10_chain1_ab.json` where the global arm is enabled and the fair arm is disabled.
+- Do not launch another U10 marshal while PID 23868 is active. Preserve the full-model lane and the queued global CHAIN=1 run.

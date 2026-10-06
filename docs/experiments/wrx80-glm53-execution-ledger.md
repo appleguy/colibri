@@ -627,3 +627,8 @@ U01 is cleared. ACTIVE next unit: U10.1, prepare the first real CHAIN=1 short A/
 ### U10.1 preparation checkpoint
 
 The exact-source CHAIN=1 short A/B manifest is committed as 50c6f60. Global residency is enabled first; fair residency remains disabled until the global result is preserved. The active full-model comparison process takes precedence, so U10.2 launch is blocked until glm53 releases the GPU.
+
+
+### U10.2 serialized behind full-model comparison
+
+The global CHAIN=1 short run is queued safely behind full-model comparison marshal PID 500. Queue PID 23868 waits for the entire full-model marshal to exit, then for the inference lane to become empty, before launching the exact-source U10 manifest. This avoids racing between full-model arms and CHAIN=1.
