@@ -3323,21 +3323,44 @@ __global__ static void glm_sparse_score_kernel(float *scores,const float *query,
 __global__ static void glm_sparse_select_kernel(int *out,const float *scores,
         unsigned char *taken,const unsigned char *valid,int sequence,int q,int first,int pools,
         int pool,int topk,int with_tail){
-    if(blockIdx.x||threadIdx.x)return;
-    int width=topk+(with_tail?pool-1:0),wanted=topk/pool;
-    for(int i=0;i<width;i++)out[i]=-1;
-    if(q<0||q>=sequence||!valid[q])return;
+    if(blockIdx.x)return;
+    __shared__ float best_value[256];
+    __shared__ int best_index[256];
+    __shared__ int active;
+    int tid=threadIdx.x,width=topk+(with_tail?pool-1:0),wanted=topk/pool;
+    for(int i=tid;i<width;i+=blockDim.x)out[i]=-1;
+    if(tid==0)active=(q>=0&&q<sequence&&valid[q]);
+    __syncthreads();
+    if(!active)return;
     for(int rank=0;rank<wanted;rank++){
         int best=-1; float bv=-FLT_MAX;
-        for(int p=0;p<pools;p++){
+        for(int p=tid;p<pools;p+=blockDim.x){
             float v=scores[p];
-            if(!taken[p]&&v>-FLT_MAX&&(best<0||v>bv)){best=p;bv=v;}
+            if(!taken[p]&&v>-FLT_MAX&&
+               (best<0||v>bv||(v==bv&&p<best))){best=p;bv=v;}
         }
-        if(best<0)break;
-        taken[best]=1;
-        for(int j=0;j<pool;j++)out[rank*pool+j]=first+best*pool+j;
+        best_value[tid]=bv; best_index[tid]=best;
+        __syncthreads();
+        for(int stride=blockDim.x>>1;stride;stride>>=1){
+            if(tid<stride){
+                int other=best_index[tid+stride];
+                float ov=best_value[tid+stride];
+                int mine=best_index[tid];
+                float mv=best_value[tid];
+                if(other>=0&&(mine<0||ov>mv||(ov==mv&&other<mine))){
+                    best_index[tid]=other; best_value[tid]=ov;
+                }
+            }
+            __syncthreads();
+        }
+        int chosen=best_index[0];
+        if(chosen<0)break;
+        if(tid==0)taken[chosen]=1;
+        for(int j=tid;j<pool;j+=blockDim.x)
+            out[rank*pool+j]=first+chosen*pool+j;
+        __syncthreads();
     }
-    if(with_tail){
+    if(tid==0&&with_tail){
         int visible=0;
         for(int i=first;i<=q;i++)if(valid[i])visible++;
         int tail=visible%pool,tail_start=first+visible-tail;
@@ -3385,7 +3408,7 @@ extern "C" int coli_cuda_sparse_index_select_decode(int device,int *out_host,
     glm_sparse_score_kernel<<<(pools+127)/128,128,0,dc->stream>>>(dc->al,dq,dc->aq,dh,
         complete,q,first,pools,pool,heads,dim);
     if(!cuda_ok(cudaMemsetAsync(taken,0,cb,dc->stream),"GLM sparse index taken clear"))return 0;
-    glm_sparse_select_kernel<<<1,1,0,dc->stream>>>(dc->asel,dc->al,taken,dv,sequence,q,first,pools,
+    glm_sparse_select_kernel<<<1,256,0,dc->stream>>>(dc->asel,dc->al,taken,dv,sequence,q,first,pools,
         pool,topk,with_tail);
     if(!cuda_ok(cudaGetLastError(),"GLM sparse index launch")||
        !cuda_ok(cudaMemcpyAsync(out_host,dc->asel,ob,cudaMemcpyDeviceToHost,dc->stream),
