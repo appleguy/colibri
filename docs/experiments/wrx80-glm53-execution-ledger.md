@@ -174,6 +174,7 @@ Completed checkpoints:
 - `8a458bef` persists the decode validity history alongside the pooled index cache, appending only newly visible validity bytes and letting both pool construction and top-k tail handling read the resident mask. This removes the remaining O(context) validity-mask H2D from qualified decode while preserving the stateful incomplete-pool parity test; RTX CUDA parity plus CPU/CUDA-linked GLM builds pass.
 - `792108b9` keeps each layer's immutable k-pool compression APE resident beside the pooled-index cache instead of uploading it whenever a new pool completes. RTX CUDA parity plus CPU/CUDA-linked GLM builds pass; this removes another per-pool H2D command at negligible VRAM cost.
 - `26bf8671` completes `COLI_CUDA_GLM53_INDEXER=1` authoritative decode plumbing. Mode 1 runs the CUDA indexer first and skips CPU sparse selection on success, but falls back immediately to the unchanged CPU selector on any backend failure; mode 2 remains CPU-authoritative exact-parity qualification. CPU and CUDA-linked GLM builds pass. Do not enable mode 1 until a real-model mode-2 run is clean.
+- `548b5269` splits cumulative indexer profiling into `index_proj` and `index_select` while preserving the aggregate `indexer` bucket. The next real-model run can therefore distinguish CPU projection/LayerNorm cost from sparse-selection cost before choosing the next GPU migration target. CPU and CUDA-linked GLM builds pass.
 
 Work:
 - persistent latent/KV/index state in VRAM where capacity permits;
