@@ -433,6 +433,17 @@ Next:
 - then run an authoritative decode arm with indexer/router mode 1 and compare wall time/utilization;
 - separately sweep expert reserve only after preserving at least ~1.5–2 GiB transient headroom.
 
+### Native Windows qualification Q2/Q2b — stack fix + decode-only chain
+
+Q2, after `2f6440c4` restricted chain mode to S=1, made prefill cleanly use the proven path but crashed after forward 4. Windows Application Error event 1000 identified exception `0xc00000fd` in `coli_cuda.dll` at RVA `0x21a57`. Disassembly mapped this to MSVC `__chkstk`: `coli_cuda_expert_group_host_clamped` had a ~5.27 MiB stack frame because three local `ColiCudaTensor[64]` arrays each embedded the tensor's 512-entry ragged-KV metadata.
+
+- `e01b090` moves those temporary descriptor arrays to heap-backed `std::vector` storage. The native frame shrank to ~2 KiB (`sub rsp,0x7f8`). Native and WSL RTX CUDA correctness suites pass; CPU/CUDA-linked GLM builds and native host relink pass.
+- `f075f0f` adds startup-only resident-history coverage telemetry. The current 1,142-expert / 15.06 GiB tier covers 24.2% of historical selection mass, but is highly uneven: layer 5 has only 3.0% / 4 resident experts while layer 19 has 37.9% / 39. Offline equal-per-layer allocation with the same 1,142 experts retains ~23.79% total historical mass while raising worst-layer historical coverage to ~16.05%.
+- Q2b (`q2b-stackfix-parity.log`) crossed the former crash boundary and completed. S=1 chain verification is at float-noise scale (reported absolute drift ~1e-8 to 1e-6); sparse indexer reported 8/8 exact passes with zero mismatch/failure; router selected indices matched; shared/resident MoE drift stayed at float-noise scale.
+- Q2b decode: 2 tokens in 2.4 s = 0.850 tok/s under heavy qualification overhead. Peak CUDA used 22,809.5 MiB, minimum free 1,754 MiB. Resident complete-set coverage remained 0/84; chain resident-input continuity remained 12.2%.
+
+Next experimental gate is B1 from the native Windows plan: disable chain verification, keep router/indexer mode 2, generate 8–16 deterministic tokens, capture utilization and parity, then promote router/indexer one at a time if clean.
+
 ## Wake prompt
 
 > Resume the WRX80 GLM-5.3 optimization from
