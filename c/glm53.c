@@ -1365,15 +1365,42 @@ static int mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
 
     const int width = coli_sparse_index_width(c->index_topk, c->index_kpool, c->index_kpool_tail);
     int *selected = malloc((size_t)tokens * width * sizeof(int));
-    const double select_t0 = profile_enabled() ? now_s() : 0.0;
-    if (coli_sparse_index_select_range(selected, iq, ik, gates, head_w, l->ikpa, valid,
-                                       seen, IH, ID, c->index_kpool, c->index_topk,
-                                       c->index_kpool_tail, base, seen)) {
-        fprintf(stderr, "indexer selection failed\n"); exit(1);
-    }
-    if (select_t0) m->t_indexer += now_s() - select_t0;
+    int selected_ready = 0;
 #ifdef COLI_CUDA
-    if (tokens == 1 && cuda_indexer_mode() == 2 && g_cuda_ready && width <= 4096) {
+    const int index_mode = (tokens == 1 && g_cuda_ready && width <= 4096) ?
+        cuda_indexer_mode() : 0;
+    if (index_mode == 1) {
+        const double select_t0 = profile_enabled() ? now_s() : 0.0;
+        selected_ready = coli_cuda_sparse_index_select_decode(
+            g_cuda_device, selected, iq, ik, gates, head_w, l->ikpa, valid,
+            seen, IH, ID, c->index_kpool, c->index_topk,
+            c->index_kpool_tail, base);
+        if (select_t0) m->t_indexer += now_s() - select_t0;
+        static uint64_t authoritative_ok = 0, authoritative_fallback = 0;
+        if (selected_ready) authoritative_ok++; else authoritative_fallback++;
+        static int authoritative_reports = 0;
+        if (!selected_ready || authoritative_reports < 8) {
+            fprintf(stderr,
+                    "[CUDA] GLM53 indexer authoritative q=%d ok=%d pass=%llu fallback=%llu\n",
+                    base, selected_ready,
+                    (unsigned long long)authoritative_ok,
+                    (unsigned long long)authoritative_fallback);
+            authoritative_reports++;
+        }
+    }
+#endif
+    if (!selected_ready) {
+        const double select_t0 = profile_enabled() ? now_s() : 0.0;
+        if (coli_sparse_index_select_range(selected, iq, ik, gates, head_w, l->ikpa, valid,
+                                           seen, IH, ID, c->index_kpool, c->index_topk,
+                                           c->index_kpool_tail, base, seen)) {
+            fprintf(stderr, "indexer selection failed\n"); exit(1);
+        }
+        if (select_t0) m->t_indexer += now_s() - select_t0;
+        selected_ready = 1;
+    }
+#ifdef COLI_CUDA
+    if (index_mode == 2) {
         int gpu_selected[4096];
         const int gpu_ok = coli_cuda_sparse_index_select_decode(
             g_cuda_device, gpu_selected, iq, ik, gates, head_w, l->ikpa, valid,
