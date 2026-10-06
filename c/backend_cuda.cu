@@ -2470,6 +2470,102 @@ static int absorb_fmt_ok(const ColiCudaTensor *w){
     return w && coli_cuda_weight_at_supported(w->fmt);
 }
 
+
+__global__ static void attention_absorbed_sparse_kernel(
+        float *ctx,const float *q_abs,const float *latent,const int *selected,
+        const void *weights,const float *wscale,int fmt,int S,int H,int V,int K,
+        int T,int width,float scale,int gs,int ng) {
+    int s=blockIdx.y,h=blockIdx.x,tid=threadIdx.x;
+    if(s>=S||h>=H)return;
+    extern __shared__ float sm[];
+    float *scores=sm,*red=scores+width,*pooled=red+blockDim.x;
+    const float *q=q_abs+((size_t)s*H+h)*K;
+    const int *sel=selected+(size_t)s*width;
+
+    for(int i=tid;i<width;i+=blockDim.x){
+        int at=sel[i];
+        float a=-3.402823466e+38F;
+        if(at>=0&&at<T){
+            a=0.f;const float *lt=latent+(size_t)at*K;
+            for(int k=0;k<K;k++)a+=q[k]*lt[k];
+            a*=scale;
+        }
+        scores[i]=a;
+    }
+    __syncthreads();
+
+    float local=-3.402823466e+38F;
+    for(int i=tid;i<width;i+=blockDim.x)local=fmaxf(local,scores[i]);
+    red[tid]=local;__syncthreads();
+    for(int n=blockDim.x>>1;n;n>>=1){
+        if(tid<n)red[tid]=fmaxf(red[tid],red[tid+n]);
+        __syncthreads();
+    }
+    float mx=red[0];
+    local=0.f;
+    for(int i=tid;i<width;i+=blockDim.x){
+        int at=sel[i];
+        float e=(at>=0&&at<T)?expf(scores[i]-mx):0.f;
+        scores[i]=e;local+=e;
+    }
+    red[tid]=local;__syncthreads();
+    for(int n=blockDim.x>>1;n;n>>=1){
+        if(tid<n)red[tid]+=red[tid+n];
+        __syncthreads();
+    }
+    float inv=red[0]>0.f?1.f/red[0]:0.f;
+    for(int k=tid;k<K;k+=blockDim.x){
+        float a=0.f;
+        for(int i=0;i<width;i++){
+            int at=sel[i];
+            if(at>=0&&at<T)a+=scores[i]*inv*latent[(size_t)at*K+k];
+        }
+        pooled[k]=a;
+    }
+    __syncthreads();
+
+    size_t rb=row_bytes(fmt,K);
+    for(int v=tid;v<V;v+=blockDim.x){
+        int row=h*V+v;float a=0.f;
+        for(int k=0;k<K;k++)
+            a+=pooled[k]*weight_at(weights,fmt,(size_t)row*rb,k)*
+               absorb_scale(wscale,fmt,gs,ng,row,k);
+        ctx[((size_t)s*H+h)*V+v]=a;
+    }
+}
+
+extern "C" int coli_cuda_attention_absorbed_sparse_batch(
+        ColiCudaTensor *v_proj,float *ctx,const float *q_abs,
+        const float *latent,const int *selected,int S,int H,int V,int K,
+        int T,int width,float scale){
+    if(fault_injected())return 0;
+    if(!absorb_fmt_ok(v_proj)||!ctx||!q_abs||!latent||!selected||
+       S<1||H<1||V<1||K<1||K>512||T<1||width<1||width>4096||
+       v_proj->I!=K||v_proj->O!=H*V)return 0;
+    DeviceContext *dc=find_ctx(v_proj->device);if(!select_ctx(dc))return 0;
+    size_t qb=(size_t)S*H*K*sizeof(float),lb=(size_t)T*K*sizeof(float);
+    size_t sb=(size_t)S*width*sizeof(int),cb=(size_t)S*H*V*sizeof(float);
+    if(!reserve(&dc->aq,&dc->aq_cap,qb)||!reserve(&dc->al,&dc->al_cap,lb)||
+       !reserve_bytes((void**)&dc->asel,&dc->asel_cap,sb)||!reserve(&dc->ac,&dc->ac_cap,cb))
+        return 0;
+    if(!cuda_ok(cudaMemcpyAsync(dc->aq,q_abs,qb,cudaMemcpyHostToDevice,dc->stream),
+                "absorbed sparse q upload")||
+       !cuda_ok(cudaMemcpyAsync(dc->al,latent,lb,cudaMemcpyHostToDevice,dc->stream),
+                "absorbed sparse latent upload")||
+       !cuda_ok(cudaMemcpyAsync(dc->asel,selected,sb,cudaMemcpyHostToDevice,dc->stream),
+                "absorbed sparse selection upload"))return 0;
+    size_t shared=(size_t)(width+256+K)*sizeof(float);
+    attention_absorbed_sparse_kernel<<<dim3((unsigned)H,(unsigned)S),256,shared,dc->stream>>>(
+        dc->ac,dc->aq,dc->al,dc->asel,v_proj->weights,v_proj->scales,v_proj->fmt,
+        S,H,V,K,T,width,scale,v_proj->gs,v_proj->ng);
+    if(!cuda_ok(cudaGetLastError(),"absorbed sparse attention launch")||
+       !cuda_ok(cudaMemcpyAsync(ctx,dc->ac,cb,cudaMemcpyDeviceToHost,dc->stream),
+                "absorbed sparse context download")||
+       !cuda_ok(cudaStreamSynchronize(dc->stream),"absorbed sparse attention synchronize"))
+        return 0;
+    return 1;
+}
+
 extern "C" int coli_cuda_attention_absorb(ColiCudaTensor *w,float *ctx,const float *q,
                                             const float *latent,const float *rope,int H,int Q,
                                             int R,int V,int K,int T,float scale){
