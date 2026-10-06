@@ -3321,7 +3321,7 @@ __global__ static void glm_sparse_score_kernel(float *scores,const float *query,
     scores[p]=score;
 }
 __global__ static void glm_sparse_select_kernel(int *out,const float *scores,
-        const unsigned char *valid,int sequence,int q,int first,int pools,
+        unsigned char *taken,const unsigned char *valid,int sequence,int q,int first,int pools,
         int pool,int topk,int with_tail){
     if(blockIdx.x||threadIdx.x)return;
     int width=topk+(with_tail?pool-1:0),wanted=topk/pool;
@@ -3331,12 +3331,10 @@ __global__ static void glm_sparse_select_kernel(int *out,const float *scores,
         int best=-1; float bv=-FLT_MAX;
         for(int p=0;p<pools;p++){
             float v=scores[p];
-            if(v<=-FLT_MAX)continue;
-            int used=0;
-            for(int r=0;r<rank;r++) if(out[r*pool]==first+p*pool){used=1;break;}
-            if(!used&&(best<0||v>bv)){best=p;bv=v;}
+            if(!taken[p]&&v>-FLT_MAX&&(best<0||v>bv)){best=p;bv=v;}
         }
         if(best<0)break;
+        taken[best]=1;
         for(int j=0;j<pool;j++)out[rank*pool+j]=first+best*pool+j;
     }
     if(with_tail){
@@ -3370,8 +3368,10 @@ extern "C" int coli_cuda_sparse_index_select_decode(int device,int *out_host,
     float *da=coli_cuda_pipe_scratch(device,26,ab);
     if(!dq||!dk||!dg||!dh||!da||
        !reserve(&dc->aq,&dc->aq_cap,pb)||!reserve(&dc->al,&dc->al_cap,sb)||
-       !reserve_bytes((void**)&dc->ar,&dc->ar_cap,cb)||
+       !reserve_bytes((void**)&dc->ar,&dc->ar_cap,2*cb)||
        !reserve_bytes((void**)&dc->asel,&dc->asel_cap,ob+vb))return 0;
+    unsigned char *complete=(unsigned char*)dc->ar;
+    unsigned char *taken=complete+pools;
     unsigned char *dv=(unsigned char*)dc->asel+ob;
     if(!cuda_ok(cudaMemcpyAsync(dq,query,qb,cudaMemcpyHostToDevice,dc->stream),"sparse index query upload")||
        !cuda_ok(cudaMemcpyAsync(dk,keys,kb,cudaMemcpyHostToDevice,dc->stream),"sparse index key upload")||
@@ -3380,11 +3380,12 @@ extern "C" int coli_cuda_sparse_index_select_decode(int device,int *out_host,
        !cuda_ok(cudaMemcpyAsync(da,ape,ab,cudaMemcpyHostToDevice,dc->stream),"sparse index ape upload")||
        !cuda_ok(cudaMemcpyAsync(dv,valid,vb,cudaMemcpyHostToDevice,dc->stream),"sparse index valid upload"))
         return 0;
-    glm_sparse_pool_kernel<<<pools,128,0,dc->stream>>>(dc->aq,(unsigned char*)dc->ar,
+    glm_sparse_pool_kernel<<<pools,128,0,dc->stream>>>(dc->aq,complete,
         dk,dg,da,dv,sequence,dim,pool,first,pools);
     glm_sparse_score_kernel<<<(pools+127)/128,128,0,dc->stream>>>(dc->al,dq,dc->aq,dh,
-        (unsigned char*)dc->ar,q,first,pools,pool,heads,dim);
-    glm_sparse_select_kernel<<<1,1,0,dc->stream>>>(dc->asel,dc->al,dv,sequence,q,first,pools,
+        complete,q,first,pools,pool,heads,dim);
+    if(!cuda_ok(cudaMemsetAsync(taken,0,cb,dc->stream),"GLM sparse index taken clear"))return 0;
+    glm_sparse_select_kernel<<<1,1,0,dc->stream>>>(dc->asel,dc->al,taken,dv,sequence,q,first,pools,
         pool,topk,with_tail);
     if(!cuda_ok(cudaGetLastError(),"GLM sparse index launch")||
        !cuda_ok(cudaMemcpyAsync(out_host,dc->asel,ob,cudaMemcpyDeviceToHost,dc->stream),
