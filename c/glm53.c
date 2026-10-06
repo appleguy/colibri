@@ -1554,6 +1554,32 @@ static int cuda_router_try(GModel *m, GLayer *l, const float *row,
         return 0;
     return keff == topk;
 }
+static int cuda_shared_mlp_verify_dev(GModel *m, GLayer *l,
+        const float *x_dev, float *out_host) {
+    if (!m || !l || !x_dev || !out_host || !g_cuda_ready) return 0;
+    if (!cuda_mat_ensure(&l->rg) || !cuda_mat_ensure(&l->ru) ||
+        !cuda_mat_ensure(&l->rd)) return 0;
+    const int I = l->rg.rows, D = m->c.hidden;
+    if (I < 1 || l->ru.rows != I || l->rg.columns != D ||
+        l->ru.columns != D || l->rd.columns != I || l->rd.rows != D)
+        return 0;
+    float *gate_dev = coli_cuda_pipe_scratch(
+        g_cuda_device, 19, (size_t)I * sizeof(float));
+    float *up_dev = coli_cuda_pipe_scratch(
+        g_cuda_device, 20, (size_t)I * sizeof(float));
+    float *out_dev = coli_cuda_pipe_scratch(
+        g_cuda_device, 21, (size_t)D * sizeof(float));
+    if (!gate_dev || !up_dev || !out_dev ||
+        !coli_cuda_pipe_gemm((ColiCudaTensor *)l->rg.cuda, gate_dev, x_dev, 1) ||
+        !coli_cuda_pipe_gemm((ColiCudaTensor *)l->ru.cuda, up_dev, x_dev, 1) ||
+        !coli_cuda_pipe_swiglu_clamped(g_cuda_device, gate_dev, up_dev,
+                                       (size_t)I, m->c.swiglu_limit) ||
+        !coli_cuda_pipe_gemm((ColiCudaTensor *)l->rd.cuda, out_dev, gate_dev, 1) ||
+        !coli_cuda_pipe_download(g_cuda_device, out_dev, out_host,
+                                 (size_t)D * sizeof(float)))
+        return 0;
+    return 1;
+}
 #endif
 
 /* ================= streaming degli esperti =================
