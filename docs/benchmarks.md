@@ -42,6 +42,13 @@ cd c && ./setup.sh                 # build + architecture self-test (expects ~30
 gcc -O2 -fopenmp iobench.c -o iobench
 ./iobench /path/to/glm52_i4/out-00069.safetensors 19 64 8 0   # buffered, 8 threads
 ./iobench /path/to/glm52_i4/out-00069.safetensors 19 64 8 1   # O_DIRECT (bypass cache)
+
+# Optional final argument isolates host access shape without changing offsets:
+./iobench /path/to/shard.safetensors 19 64 8 0 per-thread   # one fd/HANDLE per worker
+./iobench /path/to/shard.safetensors 19 64 8 0 shared       # one shared shard fd/HANDLE
+./iobench /path/to/shard.safetensors 19 64 8 0 map          # persistent file mapping + demand faults
+# map is page-cache backed and therefore ignores direct=1. It copies every
+# selected byte so the result includes the actual page faults/data movement.
 # Caveat (#86): iobench reads a bounded ~1 GB shard, so buffered reads on a big-RAM box
 # report the PAGE CACHE, not the disk. Use the O_DIRECT run (arg 1) for a true number, and
 # run it on a shard you haven't touched this session (a prior buffered run caches its pages).

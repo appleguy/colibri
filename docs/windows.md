@@ -65,6 +65,8 @@ Open a command prompt shell (`cmd`, not powershell), cd to subfolder `c\` of the
 `make colibri.exe CUDA_DLL=1 ARCH=native`\
 `make iobench.exe`\
 \
+`iobench.exe` also accepts an optional final access-mode argument: `per-thread` (default), `shared`, or `map`. On Windows this separates NTFS/device bandwidth from handle-serialization and file-mapping behavior before changing the engine. Use the same shard, block size, read count, thread count, and cache state for every arm.\
+\
 Replace `sm_89` with your Nvidia GPU architecture according to this table
 
 | Architecture | Example GPUs / Products | Compute Capability | `nvcc` Flag (`-arch=sm_XX`) |
