@@ -991,6 +991,19 @@ static void mv_rows(float *out, const Mat *w, const float *x, int row0, int rows
  *
  * Il campo `vk` e' una cache dentro a una matrice che il resto del codice
  * tratta come sola lettura: da qui il cast, che riguarda solo lui. */
+
+#ifdef COLI_CUDA
+static int cuda_mat_ensure(Mat *w) {
+    if (!g_cuda_ready || !w || !w->resident || (w->fmt != 1 && w->fmt != 4))
+        return 0;
+    if (w->cuda) return 1;
+    const void *weights = w->fmt == 4 ? (const void *)w->q4 : (const void *)w->q8;
+    return coli_cuda_tensor_upload_g((ColiCudaTensor **)&w->cuda, weights, w->s,
+                                     w->fmt, w->columns, w->rows,
+                                     g_cuda_device, w->gs);
+}
+#endif
+
 static void mv(float *out, const Mat *w, const float *x) {
 #ifdef COLI_METAL
     if (g_metal_ready && w->resident && (w->fmt == 1 || w->fmt == 4)) {
