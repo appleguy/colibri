@@ -1418,32 +1418,39 @@ static void mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
 
 /* ---------- FFN: denso oppure MoE ---------- */
 #ifdef COLI_CUDA
+static int cuda_router_prepare(GModel *m, GLayer *l) {
+    const Cfg *c = &m->c;
+    if (cuda_router_mode() <= 0 || !g_cuda_ready || !l->router || !l->rbias ||
+        l->router_cuda_bad || c->n_experts < 1 || c->n_experts > 4096)
+        return 0;
+    if (l->router_cuda && l->rbias_cuda) return 1;
+
+    void *rw = coli_cuda_pipe_alloc(g_cuda_device,
+                                    (size_t)c->n_experts * c->hidden * sizeof(float));
+    void *rb = coli_cuda_pipe_alloc(g_cuda_device,
+                                    (size_t)c->n_experts * sizeof(float));
+    if (!rw || !rb ||
+        !coli_cuda_pipe_upload(g_cuda_device, rw, l->router,
+                               (size_t)c->n_experts * c->hidden * sizeof(float)) ||
+        !coli_cuda_pipe_upload(g_cuda_device, rb, l->rbias,
+                               (size_t)c->n_experts * sizeof(float))) {
+        if (rw) coli_cuda_pipe_free(g_cuda_device, rw);
+        if (rb) coli_cuda_pipe_free(g_cuda_device, rb);
+        l->router_cuda_bad = 1;
+        return 0;
+    }
+    l->router_cuda = rw;
+    l->rbias_cuda = rb;
+    return 1;
+}
+
 static int cuda_router_try(GModel *m, GLayer *l, const float *row,
                            int *chosen, float *weight, int topk) {
     const Cfg *c = &m->c;
-    if (cuda_router_mode() <= 0 || !g_cuda_ready || !row || !chosen || !weight ||
-        !l->router || !l->rbias || l->router_cuda_bad ||
-        c->n_experts < 1 || c->n_experts > 4096 || topk < 1 || topk > 64)
+    if (!row || !chosen || !weight || topk < 1 || topk > 64 ||
+        !cuda_router_prepare(m, l))
         return 0;
 
-    if (!l->router_cuda || !l->rbias_cuda) {
-        void *rw = coli_cuda_pipe_alloc(g_cuda_device,
-                                        (size_t)c->n_experts * c->hidden * sizeof(float));
-        void *rb = coli_cuda_pipe_alloc(g_cuda_device,
-                                        (size_t)c->n_experts * sizeof(float));
-        if (!rw || !rb ||
-            !coli_cuda_pipe_upload(g_cuda_device, rw, l->router,
-                                   (size_t)c->n_experts * c->hidden * sizeof(float)) ||
-            !coli_cuda_pipe_upload(g_cuda_device, rb, l->rbias,
-                                   (size_t)c->n_experts * sizeof(float))) {
-            if (rw) coli_cuda_pipe_free(g_cuda_device, rw);
-            if (rb) coli_cuda_pipe_free(g_cuda_device, rb);
-            l->router_cuda_bad = 1;
-            return 0;
-        }
-        l->router_cuda = rw;
-        l->rbias_cuda = rb;
-    }
     if (!m->gpu_router_x) {
         m->gpu_router_x = (float *)coli_cuda_pipe_alloc(
             g_cuda_device, (size_t)c->hidden * sizeof(float));
@@ -2204,6 +2211,27 @@ static void cuda_resident_matrix_prewarm(GModel *m) {
             "[CUDA] GLM53 resident matrix prewarm: %llu matrices, %.2f GiB VRAM consumed, %.2f GiB free\n",
             (unsigned long long)mats,
             before_free > after_free ? (before_free - after_free) / (double)(1ull << 30) : 0.0,
+            after_free / (double)(1ull << 30));
+}
+
+static void cuda_router_prewarm(GModel *m) {
+    if (cuda_router_mode() <= 0 || !g_cuda_ready || !m || !m->layer) return;
+    size_t before_free = 0, total = 0;
+    coli_cuda_mem_info(g_cuda_device, &before_free, &total);
+    int prepared = 0;
+    const int from = m->c.first_dense > m->layer_begin ? m->c.first_dense : m->layer_begin;
+    for (int i = from; i < m->layer_end; i++)
+        if (cuda_router_prepare(m, &m->layer[i])) prepared++;
+    if (!m->gpu_router_x) {
+        m->gpu_router_x = (float *)coli_cuda_pipe_alloc(
+            g_cuda_device, (size_t)m->c.hidden * sizeof(float));
+    }
+    size_t after_free = 0;
+    coli_cuda_mem_info(g_cuda_device, &after_free, &total);
+    fprintf(stderr,
+            "[CUDA] GLM53 router prewarm: %d layers, %.2f MiB VRAM consumed, %.2f GiB free\n",
+            prepared,
+            before_free > after_free ? (before_free - after_free) / 1048576.0 : 0.0,
             after_free / (double)(1ull << 30));
 }
 
@@ -4564,6 +4592,7 @@ int main(int argc, char **argv) {
         glm53_telemetry_init(snap, &served.c);
 #ifdef COLI_CUDA
         cuda_resident_matrix_prewarm(&served);
+        cuda_router_prewarm(&served);
         cuda_resident_expert_init(&served);
 #endif
         expert_cache_prewarm(&served);
@@ -4627,6 +4656,7 @@ int main(int argc, char **argv) {
     glm53_telemetry_init(dir, &model.c);
 #ifdef COLI_CUDA
     cuda_resident_matrix_prewarm(&model);
+    cuda_router_prewarm(&model);
     cuda_resident_expert_init(&model);
 #endif
     expert_cache_prewarm(&model);
