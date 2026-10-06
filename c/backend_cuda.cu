@@ -3154,12 +3154,12 @@ extern "C" int coli_cuda_pipe_hc_pre(int device,float *out_dev,float *post_dev,f
     float *mixes=coli_cuda_pipe_scratch(device,6,(size_t)S*mix_count*sizeof(float));
     float *pre=coli_cuda_pipe_scratch(device,7,(size_t)S*hc*sizeof(float));
     if(!inv||!mixes||!pre) return 0;
-    pipe_hc_inv_rms_kernel<<<S,1>>>(inv,input_dev,S,hc,D,norm_eps);
-    pipe_hc_mix_kernel<<<dim3((unsigned)mix_count,(unsigned)S),1>>>(
+    pipe_hc_inv_rms_kernel<<<S,1,0,ctx->stream>>>(inv,input_dev,S,hc,D,norm_eps);
+    pipe_hc_mix_kernel<<<dim3((unsigned)mix_count,(unsigned)S),1,0,ctx->stream>>>(
         mixes,input_dev,fn_dev,inv,S,hc,D);
-    pipe_hc_sinkhorn_kernel<<<S,1>>>(pre,post_dev,comb_dev,mixes,scale_dev,base_dev,
+    pipe_hc_sinkhorn_kernel<<<S,1,0,ctx->stream>>>(pre,post_dev,comb_dev,mixes,scale_dev,base_dev,
                                      S,hc,iterations,hc_eps);
-    pipe_hc_collapse_kernel<<<S,256>>>(out_dev,input_dev,pre,S,hc,D);
+    pipe_hc_collapse_kernel<<<S,256,0,ctx->stream>>>(out_dev,input_dev,pre,S,hc,D);
     return cuda_ok(cudaGetLastError(),"pipe hyperconnection pre");
 }
 extern "C" void *coli_cuda_pipe_alloc(int device,size_t bytes){
@@ -3185,7 +3185,7 @@ extern "C" int coli_cuda_pipe_rmsnorm(int device,float *y_dev,const float *x_dev
     if (fault_injected()) return 0;
     DeviceContext *ctx=find_ctx(device);
     if(S<1||D<1||!select_ctx(ctx)) return 0;
-    pipe_rmsnorm_rows<<<S,256>>>(y_dev,x_dev,w_dev,D,eps,D,D);
+    pipe_rmsnorm_rows<<<S,256,0,ctx->stream>>>(y_dev,x_dev,w_dev,D,eps,D,D);
     return cuda_ok(cudaGetLastError(),"pipe rmsnorm");
 }
 extern "C" int coli_cuda_pipe_rmsnorm_s(int device,float *y_dev,const float *x_dev,
@@ -3194,7 +3194,7 @@ extern "C" int coli_cuda_pipe_rmsnorm_s(int device,float *y_dev,const float *x_d
     if (fault_injected()) return 0;
     DeviceContext *ctx=find_ctx(device);
     if(S<1||D<1||xstride<D||ystride<D||!select_ctx(ctx)) return 0;
-    pipe_rmsnorm_rows<<<S,256>>>(y_dev,x_dev,w_dev,D,eps,xstride,ystride);
+    pipe_rmsnorm_rows<<<S,256,0,ctx->stream>>>(y_dev,x_dev,w_dev,D,eps,xstride,ystride);
     return cuda_ok(cudaGetLastError(),"pipe rmsnorm strided");
 }
 extern "C" int coli_cuda_pipe_rope(int device,float *v_dev,const int *pos_dev,
