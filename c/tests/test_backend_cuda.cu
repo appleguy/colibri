@@ -596,14 +596,24 @@ int main(int argc, char **argv) {
         std::fprintf(stderr,"absorbed sparse CUDA attention+projection mismatch\n");
         return 1;
     }
-    float adev[AS*AO];
+    float adev[AS*AO], aqa_ephemeral[AS*AH*AK];
+    int asel_ephemeral[AS*AW];
+    std::memcpy(aqa_ephemeral,aqa,sizeof(aqa_ephemeral));
+    std::memcpy(asel_ephemeral,asel,sizeof(asel_ephemeral));
     float *adev_out=(float*)coli_cuda_pipe_alloc(d0,sizeof(adev));
-    if(!adev_out||
-       !coli_cuda_attention_absorbed_sparse_project_batch_dev_out(
-            avt,opt,adev_out,aqa,ala,asel,AS,AH,AV,AK,AT,AW,.5f)||
-       !coli_cuda_pipe_download(d0,adev_out,adev,sizeof(adev))||
-       !close_enough(adev,aproj,AS*AO)){
-        std::fprintf(stderr,"absorbed sparse CUDA dev-out projection mismatch\n");
+    int adev_ok=adev_out &&
+       coli_cuda_attention_absorbed_sparse_project_batch_dev_out(
+            avt,opt,adev_out,aqa_ephemeral,ala,asel_ephemeral,AS,AH,AV,AK,AT,AW,.5f);
+    if(adev_ok){
+        /* The dev-out contract may return while MLA/o_proj is still queued.
+         * Its ephemeral query/selection inputs must already be safe to reuse. */
+        std::memset(aqa_ephemeral,0xa5,sizeof(aqa_ephemeral));
+        for(int i=0;i<AS*AW;i++) asel_ephemeral[i]=-1234567;
+        adev_ok=coli_cuda_pipe_download(d0,adev_out,adev,sizeof(adev)) &&
+                close_enough(adev,aproj,AS*AO);
+    }
+    if(!adev_ok){
+        std::fprintf(stderr,"absorbed sparse CUDA dev-out projection/lifetime mismatch\n");
         return 1;
     }
     coli_cuda_pipe_free(d0,adev_out);

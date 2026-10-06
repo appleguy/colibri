@@ -108,11 +108,13 @@ typedef struct {
     uint8_t *qx; float *qscale;
     size_t qx_cap, qscale_cap;
     float *host_x,*host_y,*host_kv; size_t host_x_cap,host_y_cap,host_kv_cap;
+    float *host_sparse; size_t host_sparse_cap; /* ephemeral GLM sparse q/selection staging */
     float *aq,*al,*ar,*ac; size_t aq_cap,al_cap,ar_cap,ac_cap;
     int *asel; size_t asel_cap;
     float *pipe_buf[27]; size_t pipe_cap[27];   /* scratch persistenti del resident pipeline */
     cudaStream_t stream;
     cudaEvent_t ev_done; int ev_done_ok;        /* resident-group issue completion (#431 PR-C0) */
+    cudaEvent_t sparse_upload_done; int sparse_upload_event_ok, sparse_upload_pending;
     void *group_desc; size_t group_desc_cap;
     void *glm_group_weights; size_t glm_group_weights_cap;
     void *glm_group_scales; size_t glm_group_scales_cap;
@@ -1384,9 +1386,13 @@ extern "C" void coli_cuda_shutdown(void) {
         if(ctx->aq)cudaFree(ctx->aq);if(ctx->al)cudaFree(ctx->al);if(ctx->ar)cudaFree(ctx->ar);if(ctx->ac)cudaFree(ctx->ac);
         if(ctx->asel)cudaFree(ctx->asel);
         for(int b=0;b<27;b++) if(ctx->pipe_buf[b]) cudaFree(ctx->pipe_buf[b]);
+        if (ctx->sparse_upload_pending && ctx->sparse_upload_event_ok)
+            (void)cudaEventSynchronize(ctx->sparse_upload_done);
         if (ctx->host_x) cudaFreeHost(ctx->host_x);
         if (ctx->host_y) cudaFreeHost(ctx->host_y);
         if (ctx->host_kv) cudaFreeHost(ctx->host_kv);
+        if (ctx->host_sparse) cudaFreeHost(ctx->host_sparse);
+        if (ctx->sparse_upload_event_ok) cudaEventDestroy(ctx->sparse_upload_done);
         if (ctx->stream) cudaStreamDestroy(ctx->stream);
         if (ctx->group_desc) cudaFree(ctx->group_desc);
         if (ctx->glm_group_weights) cudaFree(ctx->glm_group_weights);
@@ -1408,11 +1414,12 @@ extern "C" void coli_cuda_shutdown(void) {
         ctx->dx = ctx->dy = nullptr; ctx->dx_cap = ctx->dy_cap = 0;
         ctx->qx=nullptr; ctx->qscale=nullptr;
         ctx->aq=ctx->al=ctx->ar=ctx->ac=nullptr;ctx->asel=nullptr;
-        ctx->host_x=ctx->host_y=ctx->host_kv=nullptr;ctx->stream=nullptr;
+        ctx->host_x=ctx->host_y=ctx->host_kv=ctx->host_sparse=nullptr;ctx->stream=nullptr;
         ctx->x_cap = ctx->y_cap = ctx->gate_cap = ctx->up_cap = 0;
         ctx->qx_cap=ctx->qscale_cap=0;
         ctx->aq_cap=ctx->al_cap=ctx->ar_cap=ctx->ac_cap=0;ctx->asel_cap=0;
-        ctx->host_x_cap=ctx->host_y_cap=ctx->host_kv_cap=0;
+        ctx->host_x_cap=ctx->host_y_cap=ctx->host_kv_cap=ctx->host_sparse_cap=0;
+        ctx->sparse_upload_event_ok=ctx->sparse_upload_pending=0;
         ctx->group_desc=nullptr; ctx->group_desc_cap=0;
         ctx->glm_group_weights=nullptr; ctx->glm_group_weights_cap=0;
         ctx->glm_group_scales=nullptr; ctx->glm_group_scales_cap=0;
@@ -2630,14 +2637,29 @@ extern "C" int coli_cuda_attention_absorbed_sparse_project_batch_dev_out(
        !reserve_bytes((void**)&dc->asel,&dc->asel_cap,sb)||
        !reserve(&dc->ac,&dc->ac_cap,cb))
         return 0;
-    if(!cuda_ok(cudaMemcpyAsync(dc->aq,q_abs,qb,cudaMemcpyHostToDevice,dc->stream),
+    if(!dc->sparse_upload_event_ok){
+        if(!cuda_ok(cudaEventCreateWithFlags(&dc->sparse_upload_done,cudaEventDisableTiming),
+                    "absorbed sparse upload event")) return 0;
+        dc->sparse_upload_event_ok=1;
+    }
+    if(dc->sparse_upload_pending){
+        if(!cuda_ok(cudaEventSynchronize(dc->sparse_upload_done),
+                    "absorbed sparse staging reuse wait")) return 0;
+        dc->sparse_upload_pending=0;
+    }
+    if(!reserve_pinned(&dc->host_sparse,&dc->host_sparse_cap,qb+sb)) return 0;
+    unsigned char *stage=(unsigned char*)dc->host_sparse;
+    std::memcpy(stage,q_abs,qb);
+    std::memcpy(stage+qb,selected,sb);
+    if(!cuda_ok(cudaMemcpyAsync(dc->aq,stage,qb,cudaMemcpyHostToDevice,dc->stream),
                 "absorbed sparse q upload (dev out)")||
-       !cuda_ok(cudaMemcpyAsync(dc->al,latent,lb,cudaMemcpyHostToDevice,dc->stream),
-                "absorbed sparse latent upload (dev out)")||
-       !cuda_ok(cudaMemcpyAsync(dc->asel,selected,sb,cudaMemcpyHostToDevice,dc->stream),
+       !cuda_ok(cudaMemcpyAsync(dc->asel,stage+qb,sb,cudaMemcpyHostToDevice,dc->stream),
                 "absorbed sparse selection upload (dev out)")||
-       !cuda_ok(cudaStreamSynchronize(dc->stream),
-                "absorbed sparse input upload synchronize (dev out)"))return 0;
+       !cuda_ok(cudaEventRecord(dc->sparse_upload_done,dc->stream),
+                "absorbed sparse staging event")||
+       !cuda_ok(cudaMemcpyAsync(dc->al,latent,lb,cudaMemcpyHostToDevice,dc->stream),
+                "absorbed sparse latent upload (dev out)"))return 0;
+    dc->sparse_upload_pending=1;
     size_t shared=(size_t)(width+256+K)*sizeof(float);
     attention_absorbed_sparse_kernel<<<dim3((unsigned)H,(unsigned)S),256,shared,dc->stream>>>(
         dc->ac,dc->aq,dc->al,dc->asel,v_proj->weights,v_proj->scales,v_proj->fmt,
