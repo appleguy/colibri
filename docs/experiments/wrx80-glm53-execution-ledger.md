@@ -114,6 +114,7 @@ Completed checkpoints:
 - `4e3cd6e2` adds rolling **cross-layer residency continuity** telemetry: device mHC-pre site entries versus entries that consumed an already-resident residual. The next verification run will report `chain_residency resident_in=... pre_sites=... pct=...`; CPU and CUDA-linked builds pass.
 - `ecbb35bd` moves device mHC-post from the CUDA default stream onto Colibri's per-device **nonblocking stream**, matching sparse MLA dev-out ordering. CUDA backend parity plus CPU/CUDA-linked GLM builds pass. This is a prerequisite for removing the end-of-attention stream-wide synchronize without racing the following post step.
 - `29909ce1` moves all device mHC-pre kernels plus both RMSNorm variants onto that same nonblocking device stream. The staged-image CUDA parity test passes on the RTX 4090; concurrent sparse-indexer work was intentionally left unstaged. The residual -> mHC-pre -> RMSNorm -> sparse MLA -> mHC-post chain now has explicit same-stream ordering at its attention boundaries.
+- `68ffa6f2` moves the resident FFN chain onto the home device stream: expert-event waits/reduction, shared-expert clamped SwiGLU, shared+routed row addition, and pipe GEMM. The staged-image CUDA parity suite passes on the RTX 4090. This removes the default-stream split between resident FFN compute and FFN mHC-post while preserving deterministic event order.
 
 Work:
 - deploy verification mode at the next safe restart and measure real router/chain drift, VRAM high-water, all-resident decode coverage, and cross-layer `resident_in=1` continuity;
