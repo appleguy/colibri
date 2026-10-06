@@ -747,6 +747,7 @@ typedef struct {
     uint64_t gpu_expert_calls, gpu_expert_rows, gpu_expert_hits, gpu_expert_fallback;
     uint64_t gpu_expert_avoided_h2d_bytes;
     uint64_t gpu_decode_resident_sets, gpu_decode_all_resident_sets;
+    uint64_t gpu_chain_pre_sites, gpu_chain_pre_resident_in;
     double gpu_expert_seconds;
     size_t gpu_vram_peak_used, gpu_vram_min_free, gpu_vram_total;
     int *gpu_resident_pos, *gpu_resident_row_ids;
@@ -3620,6 +3621,8 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                 const size_t comb_b = (size_t)n * H * H * sizeof(float);
                 const size_t collapsed_b = (size_t)n * D * sizeof(float);
                 const int pre_uses_resident = resident_streams_valid;
+                m->gpu_chain_pre_sites++;
+                if (pre_uses_resident) m->gpu_chain_pre_resident_in++;
                 chain_residual_dev = pre_uses_resident ? resident_streams_dev :
                     coli_cuda_pipe_scratch(g_cuda_device, 0, residual_b);
                 float *pre_collapsed_dev = coli_cuda_pipe_scratch(g_cuda_device, 1, collapsed_b);
@@ -4062,6 +4065,14 @@ static float *forward_span(GModel *m, GSession *s, const int *tokens, int n,
                     (unsigned long long)m->gpu_decode_resident_sets,
                     100.0 * (double)m->gpu_decode_all_resident_sets /
                     (double)m->gpu_decode_resident_sets);
+        if (every > 0 && (m->forwards % (uint64_t)every) == 0 &&
+            m->gpu_chain_pre_sites)
+            fprintf(stderr,
+                    "[PROF] GLM53 chain_residency resident_in=%llu pre_sites=%llu pct=%.1f\n",
+                    (unsigned long long)m->gpu_chain_pre_resident_in,
+                    (unsigned long long)m->gpu_chain_pre_sites,
+                    100.0 * (double)m->gpu_chain_pre_resident_in /
+                    (double)m->gpu_chain_pre_sites);
 #endif
     }
 
