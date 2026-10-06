@@ -33,6 +33,7 @@ Living checkpoint log for the dedicated WRX80 / RTX 4090 host. Keep entries smal
 - A 30-second one-second-cadence sample during the request observed only 2/30 samples with nonzero SM utilization (27% and 16%); the remaining 28 samples were 0%. Treat this as a duty-cycle indicator, not precise kernel utilization, but it demonstrates long host-side intervals between CUDA bursts.
 - VRAM increased from about 13.6 GiB to 14.3 GiB during that 30-second interval as lazy CUDA state populated. No swap use was observed.
 - Implication: more resident experts can still reduce weight-transfer stalls, but sustained throughput is currently limited by host-side phases / pipeline discontinuity. Device-resident pipeline work should follow the residency sweep.
+- Rolling profiling from the first completed forward of the interrupted 12 GB run reported `attn=9.522s`, `ffn=194.730s`, `disk=177.677s`, `head=0.374s`. This is the strongest current bottleneck evidence: sparse CUDA MLA has made attention comparatively small for that chunk, while FFN time is overwhelmingly expert-cache/disk dominated. Prioritize the aggressive 21 GB resident tier before deeper attention work.
 
 
 ## 2026-10-06 01:xx PDT — 12 GB resident + sparse MLA verify qualification
