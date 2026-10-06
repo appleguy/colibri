@@ -97,11 +97,12 @@ Completed checkpoints:
 - `e825ed26` adds a tested `coli_cuda_attention_absorbed_sparse_project_batch_dev_out` backend/Windows-ABI primitive. Sparse MLA + resident `o_proj` can now leave `[S,O]` on device instead of forcing its final D2H. CUDA parity and native-Windows loader ABI tests pass. GLM-5.3 caller integration is intentionally deferred until the following hyperconnection boundary can also stay on device.
 - `425ba6ce` adds `coli_cuda_pipe_hc_post`, a device-pointer hyperconnection post primitive that keeps branch/residual/post/comb/output on the GPU and sums source streams in the same order as the CPU `coli_hc_post` loop. CUDA numerical parity, Linux header/loader parity, and native-Windows loader ABI (`55 mandatory + 9 optional`) all pass.
 - `ddac0bb4` wires an opt-in `COLI_CUDA_GLM53_CHAIN=2` verification bridge through **sparse MLA -> resident `o_proj` dev-out -> device mHC post**. It uploads the current residual/post/comb, keeps the expensive branch on device, downloads only the final residual bank for comparison, and keeps the existing CPU branch/post authoritative. CPU and CUDA-linked GLM builds plus CUDA backend parity pass; runtime drift measurement waits for the next safe service restart.
+- `2ffb20f6` adds batch-capable `coli_cuda_pipe_hc_pre`: device residual -> fidelity-first inverse-RMS / `hc_fn` mix projection / sigmoid pre-post coefficients / Sinkhorn -> device collapsed/post/comb. Scalar reduction order matches the CPU reference while independent tokens/rows/columns run in parallel. Two-token CUDA numerical parity passes at the existing `1e-4` gate; CPU and CUDA-linked GLM builds pass; Linux loader/header parity and native-Windows ABI (`56 mandatory + 9 optional`) pass.
 
 Work:
-- implement/qualify device-resident **mHC pre + Sinkhorn** so the site can enter and leave CUDA without a host bubble;
-- wire sparse-MLA dev-out -> mHC post only once the whole boundary can remain device-resident;
-- chain norm/projection/residual into the next stage without download/re-upload;
+- qualify `pipe_hc_pre` on real GLM geometry and wire **mHC pre -> RMSNorm** verification in the caller;
+- preserve the attention `hc_post` residual on device into the following FFN-site mHC pre instead of downloading/re-uploading `H*D`;
+- download only the normalized `D` row while FFN remains host-side, then move resident MoE/router consumption to the device row in the next step;
 - preserve residual stream across layer boundaries;
 - replace broad synchronizations with dependency-local synchronization.
 
