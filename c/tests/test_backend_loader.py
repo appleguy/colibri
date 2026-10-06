@@ -918,7 +918,7 @@ class LoaderStubFixtureTest(unittest.TestCase):
             cls.fixture = None
 
     def test_abi_is_derived_from_the_loader_source(self):
-        """47 mandatory + 9 optional, parsed from backend_loader.c.
+        """53 mandatory + 9 optional, parsed from backend_loader.c.
 
         The counts are a deliberate tripwire: adding a RESOLVE to the loader
         widens the ABI every Windows DLL must satisfy, and that should be a
@@ -928,15 +928,23 @@ class LoaderStubFixtureTest(unittest.TestCase):
         just a different integer.
         """
         f = self.fixture
-        self.assertEqual(len(f.mandatory), 47)
+        self.assertEqual(len(f.mandatory), 53)
         self.assertEqual(len(f.optional), 9)   # +expert_mxfp4: optional Kimi SiTU pipeline
-        self.assertEqual(len(f.exports), 56)
+        self.assertEqual(len(f.exports), 62)
         self.assertEqual(len(f.exports), len(f.mandatory) + len(f.optional))
         self.assertIn("coli_cuda_init", f.mandatory)
         self.assertIn("coli_cuda_e8_set_grid", f.optional)
         self.assertIn("coli_cuda_expert_mxfp4", f.optional)
         # attention_project_ragged: paged ragged KV runtime (#795).
         self.assertIn("coli_cuda_attention_project_ragged", f.mandatory)
+        # GLM-5.3 CUDA-resident/sparse-attention ABI. These six additions are
+        # why the mandatory tripwire moved from 47 to 53.
+        self.assertIn("coli_cuda_attention_absorbed_sparse_batch", f.mandatory)
+        self.assertIn("coli_cuda_attention_absorbed_sparse_project_batch", f.mandatory)
+        self.assertIn("coli_cuda_expert_group_clamped", f.mandatory)
+        self.assertIn("coli_cuda_expert_group_clamped_resident", f.mandatory)
+        self.assertIn("coli_cuda_expert_group_host_clamped", f.mandatory)
+        self.assertIn("coli_cuda_expert_group_resident_issue_clamped", f.mandatory)
         # fp8_set_lut: fmt=8 e4m3 dense/expert kernels (#817).
         self.assertIn("coli_cuda_fp8_set_lut", f.optional)
         # expert_group_pinned: old DLLs remain usable outside SPEC_PIN (#689).
