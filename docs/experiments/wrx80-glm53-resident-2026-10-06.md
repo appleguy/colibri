@@ -50,3 +50,11 @@ Living checkpoint log for the dedicated WRX80 / RTX 4090 host. Keep entries smal
 - Commit `17dce3b` adds a CUDA primitive that performs absorbed sparse MLA plus resident `o_proj` on-device and downloads only final [S,hidden] output. Its CUDA parity test uses an identity projection and passes on the RTX 4090.
 - Commit `593c021` switches GLM-5.3 attention mode 1 to that fused primitive while leaving mode 2 verify-first behavior unchanged.
 - The currently running 12 GB server was started before those two commits were built into the service process, so the pending 8-token result is an old-mode-1 baseline. Restart is required before measuring the fused path.
+
+
+## 2026-10-06 01:14 PDT — 12 GB performance sample invalidated by code restart
+
+- The fixed 3.4k-character / 128-token mode-1 performance request was still active when systemd intentionally restarted Colibri at 01:14:51 to load the newly committed sparse-MLA output-projection fusion.
+- The client received `engine_error` with the server log explicitly saying `colibri engine is shutting down`; this is not a model/CUDA correctness failure.
+- Do not use that request for throughput comparison. Rerun the identical workload on the post-fusion HEAD before changing resident budget.
+- The terminated service reported a 118.9 GiB memory peak and 0 B swap peak.
