@@ -3518,7 +3518,17 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                               s->kda_scratch);
                 }
             } else {
+#ifdef COLI_CUDA
+                /* Verification mode makes the device-normalized row the
+                 * explicit FFN host boundary. CPU pre/norm above remains the
+                 * oracle, but downstream FFN consumes only the D-row D2H
+                 * rather than depending on the H*D residual bank. */
+                const float *ffn_input =
+                    (chain_mode == 2 && chain_pre_ok) ? chain_pre_norm_verify : normed;
+                ffn_layer(m, l, i, ffn_input, n, branch);
+#else
                 ffn_layer(m, l, i, normed, n, branch);
+#endif
             }
             /* Un solo paio di letture del clock per sito, il ramo dice a chi
              * va il tempo. */
