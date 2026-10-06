@@ -399,6 +399,40 @@ For **cold-start / model-load / prewarm latency**:
 Do not confuse the roughly 9.5x tiny native-vs-/mnt/e storage microprobe with the current
 warmed inference bottleneck: the latest large turn spent only 1.569 s in expert-disk work.
 
+### Native Windows qualification run Q1 — 2026-10-06
+
+Configuration:
+- Flash model on `E:\z-models\GLM-5.3-Flash-colibri-int4-g64`;
+- `OMP_NUM_THREADS=16`;
+- `COLI_CUDA_RESIDENT_EXPERT_GB=18`, reserve `3`;
+- `GLM53_EXPERT_GB=175`, expert prewarm enabled;
+- `COLI_CUDA_GLM53_CHAIN=2`, `ROUTER=2`, `INDEXER=2`;
+- `GLM53_PROFILE_VRAM=1`, `GLM53_PROF_EVERY=1`, `PROF=1`;
+- fixed 3,400-character deterministic prompt, 551 prompt tokens, 2 greedy decode tokens.
+
+Observed:
+- host expert prewarm: 10,954 slots / 155.1 GB in 73.5 s;
+- resident matrices: 4.33 GiB VRAM; routers: 252 MiB; hot experts: 1,142 experts / 15.06 GiB VRAM;
+- profile peak CUDA used 21,985.5 MiB, minimum free 2,578 MiB;
+- native GPU sample remains bursty: mostly 0–20% utilization over a 10 s trace, peak 31%, roughly 63–115 W;
+- S=1 CUDA sparse indexer exact parity: 8/8 reported passes, 0 mismatches/failures;
+- router qualification reported exact selected-index parity; observed weight drift remained sub-micro;
+- shared/resident expert device-row verification remained at float-noise scale;
+- 84 decode resident expert sets were observed and **0% were fully resident** at this conservative tier;
+- decode result: 2 tokens in 2.1 s = 0.934 tok/s;
+- prefill `CHAIN=2` verification showed large drift after the first attention site. The chain path is decode-oriented, so `2f6440c4` now gates resident-chain mode to `n == 1`, leaving multi-token prefill on the proven path and reserving chain verification for S=1 decode.
+
+Raw artifacts on WRX80:
+- `E:\z-results\glm53-native-2026-10-06\q1-parity-short.log`
+- `E:\z-results\glm53-native-2026-10-06\q1-gpu-sample.csv`
+
+Next:
+- rebuild native at `2f6440c4`;
+- rerun the same workload with mode-2 router/indexer/chain;
+- require clean S=1 chain parity before using chain mode 1;
+- then run an authoritative decode arm with indexer/router mode 1 and compare wall time/utilization;
+- separately sweep expert reserve only after preserving at least ~1.5–2 GiB transient headroom.
+
 ## Wake prompt
 
 > Resume the WRX80 GLM-5.3 optimization from
