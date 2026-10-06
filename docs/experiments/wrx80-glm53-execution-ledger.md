@@ -93,11 +93,13 @@ Exit:
 
 Goal: eliminate the host bubbles between current high-utilization CUDA bursts.
 
-Completed checkpoint:
+Completed checkpoints:
 - `e825ed26` adds a tested `coli_cuda_attention_absorbed_sparse_project_batch_dev_out` backend/Windows-ABI primitive. Sparse MLA + resident `o_proj` can now leave `[S,O]` on device instead of forcing its final D2H. CUDA parity and native-Windows loader ABI tests pass. GLM-5.3 caller integration is intentionally deferred until the following hyperconnection boundary can also stay on device.
+- `425ba6ce` adds `coli_cuda_pipe_hc_post`, a device-pointer hyperconnection post primitive that keeps branch/residual/post/comb/output on the GPU and sums source streams in the same order as the CPU `coli_hc_post` loop. CUDA numerical parity, Linux header/loader parity, and native-Windows loader ABI (`55 mandatory + 9 optional`) all pass. No live caller path is switched yet.
 
 Work:
-- retain fused sparse-MLA output on device;
+- implement/qualify device-resident **mHC pre + Sinkhorn** so the site can enter and leave CUDA without a host bubble;
+- wire sparse-MLA dev-out -> mHC post only once the whole boundary can remain device-resident;
 - chain norm/projection/residual into the next stage without download/re-upload;
 - preserve residual stream across layer boundaries;
 - replace broad synchronizations with dependency-local synchronization.
