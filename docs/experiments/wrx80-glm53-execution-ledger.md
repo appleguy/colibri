@@ -155,10 +155,13 @@ Exit:
 ### U40 — GPU sparse indexer + persistent attention state
 **Class:** P
 **Depends on:** U20 device-resident activation conventions
-**Status:** PARTIAL / PLANNED
+**Status:** ACTIVE / DECODE PRIMITIVE IMPLEMENTED, NOT YET WIRED
 **Priority:** P1
 
 Goal: remove the remaining CPU-side sparse-index construction and attention-state traffic.
+
+Completed checkpoints:
+- `8aac5c2d` adds an exact decode-first CUDA sparse-index primitive matching `coli_sparse_index_select_range` for leading padding, complete pools, deterministic top-k selection, and incomplete-tail emission. RTX 4090 numerical parity, CPU GLM build, CUDA-linked GLM build, and Linux header/loader parity pass. The public CUDA ABI is wired as mandatory (`58 mandatory + 9 optional`); the Windows-invoked loader fixture still self-skips its Windows-only classes in this environment, so full native DLL fixture execution remains a later qualification item. The primitive is not yet called by GLM inference.
 
 Work:
 - persistent latent/KV/index state in VRAM where capacity permits;
