@@ -41,3 +41,12 @@ Living checkpoint log for the dedicated WRX80 / RTX 4090 host. Keep entries smal
 - During the fixed qualification request, total VRAM rose through roughly 13-15 GiB as lazy dense/attention state populated, still leaving about 9 GiB free and using no swap.
 - Sparse MLA verify samples for tokens 0-15 showed max absolute error at most 7.15256e-7. Relative error can look larger near zero (observed up to 0.0426316); absolute error remains tiny.
 - Important benchmark rule: COLI_CUDA_GLM53_ATTN=2 performs CUDA plus the complete CPU reference and therefore is a correctness mode, not a performance mode. Performance measurements must use mode 1 after qualification.
+
+
+## 2026-10-06 01:xx PDT — benchmark hygiene and sparse-MLA projection fusion
+
+- The first 12 GB / mode-1 fixed request (3,400 prompt chars, max_tokens=128) is invalid for performance comparison: the systemd service was deliberately restarted at 01:14:51 while the request was still active, and the API returned engine_error. Do not treat its elapsed time as model throughput.
+- A shorter deterministic tuning request is now the immediate comparison workload: identical 3,400-character prompt, temperature 0, max_tokens=8.
+- Commit `17dce3b` adds a CUDA primitive that performs absorbed sparse MLA plus resident `o_proj` on-device and downloads only final [S,hidden] output. Its CUDA parity test uses an identity projection and passes on the RTX 4090.
+- Commit `593c021` switches GLM-5.3 attention mode 1 to that fused primitive while leaving mode 2 verify-first behavior unchanged.
+- The currently running 12 GB server was started before those two commits were built into the service process, so the pending 8-token result is an old-mode-1 baseline. Restart is required before measuring the fused path.
