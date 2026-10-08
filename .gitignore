@@ -158,3 +158,8 @@ c/kimi_k3_tiny/.coli_usage
 c/qwen38_vision_tiny/
 c/qwen38_mm_tiny/
 c/qwen38_tiny_fp8/
+# Isolated GLM53 batching oracle artifacts
+.oracle-clean/
+.oracle-venv/
+c/glm53_tiny/
+c/glm53-kda-experiment.exe
