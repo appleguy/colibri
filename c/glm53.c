@@ -1289,11 +1289,13 @@ static void kda_layer(const Cfg *c, const GLayer *l, const float *x, int tokens,
         /* decadimento: gate_lower_bound * sigmoid(exp(A_log[h]) * (W_fb W_fa x + dt_bias)) */
         mv(low, &l->kfa, row);
         mv(decay, &l->kfb, low);
-        for (int h = 0; h < H; h++)
+        for (int h = 0; h < H; h++) {
+            const float alpha = expf(l->alog[h]);
             for (int d = 0; d < D; d++) {
                 int i = h * D + d;
-                decay[i] = c->gate_lb * sigmoidf_(expf(l->alog[h]) * (decay[i] + l->dt[i]));
+                decay[i] = c->gate_lb * sigmoidf_(alpha * (decay[i] + l->dt[i]));
             }
+        }
         mv(beta, &l->kb, row);
         for (int h = 0; h < H; h++) beta[h] = sigmoidf_(beta[h]);
         coli_kda_step(core, state, window, qkv, l->conv, decay, beta,
@@ -1367,13 +1369,13 @@ static void kda_layer_batched(const Cfg *c, const GLayer *l, const float *x,
             memcpy(qkv + P, k + at, (size_t)P * sizeof(float));
             memcpy(qkv + 2 * P, v + at, (size_t)P * sizeof(float));
             for (int h = 0; h < H; h++) {
+                const float alpha = expf(l->alog[h]);
                 beta[(size_t)t * H + h] =
                     sigmoidf_(beta[(size_t)t * H + h]);
                 for (int d = 0; d < D; d++) {
                     const int i = h * D + d;
                     decay[at + i] = c->gate_lb *
-                        sigmoidf_(expf(l->alog[h]) *
-                                  (decay[at + i] + l->dt[i]));
+                        sigmoidf_(alpha * (decay[at + i] + l->dt[i]));
                 }
             }
             coli_kda_step(core, state, window, qkv, l->conv,
