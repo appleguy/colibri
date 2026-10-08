@@ -1317,6 +1317,81 @@ static void kda_layer(const Cfg *c, const GLayer *l, const float *x, int tokens,
     free(core); free(low); free(beta); free(decay); free(gate); free(qkv);
 }
 
+/* Experimental batched KDA projections for long prefill.
+ * The recurrent update remains sequential and state-authoritative.
+ * Disabled unless GLM53_KDA_BATCH_PROJ=1. Never changes decode (tokens=1).
+ */
+static void kda_layer_batched(const Cfg *c, const GLayer *l, const float *x,
+                              int tokens, float *out, float *state,
+                              float *window, float *scratch) {
+    if (tokens <= 1) {
+        kda_layer(c, l, x, tokens, out, state, window, scratch);
+        return;
+    }
+    const int P = c->kda_proj, H = c->kda_heads, D = c->kda_hd;
+    const int tile = 64;
+    float *q = malloc((size_t)tile * P * sizeof(float));
+    float *k = malloc((size_t)tile * P * sizeof(float));
+    float *v = malloc((size_t)tile * P * sizeof(float));
+    float *decay = malloc((size_t)tile * P * sizeof(float));
+    float *gate = malloc((size_t)tile * P * sizeof(float));
+    float *low = malloc((size_t)tile * D * sizeof(float));
+    float *beta = malloc((size_t)tile * H * sizeof(float));
+    float *normed = malloc((size_t)tile * P * sizeof(float));
+    float *qkv = malloc((size_t)3 * P * sizeof(float));
+    float *core = malloc((size_t)P * sizeof(float));
+    if (!q || !k || !v || !decay || !gate || !low || !beta ||
+        !normed || !qkv || !core) {
+        fprintf(stderr, "OOM in batched KDA projections\n");
+        exit(1);
+    }
+    for (int base = 0; base < tokens; base += tile) {
+        const int rows = tokens - base < tile ? tokens - base : tile;
+        const float *src = x + (size_t)base * c->hidden;
+        mv_batch(q, &l->kq, src, rows);
+        mv_batch(k, &l->kk, src, rows);
+        mv_batch(v, &l->kv, src, rows);
+        mv_batch(low, &l->kfa, src, rows);
+        mv_batch(decay, &l->kfb, low, rows);
+        mv_batch(beta, &l->kb, src, rows);
+        mv_batch(low, &l->kga, src, rows);
+        mv_batch(gate, &l->kgb, low, rows);
+        for (int t = 0; t < rows; t++) {
+            const size_t at = (size_t)t * P;
+            memcpy(qkv, q + at, (size_t)P * sizeof(float));
+            memcpy(qkv + P, k + at, (size_t)P * sizeof(float));
+            memcpy(qkv + 2 * P, v + at, (size_t)P * sizeof(float));
+            for (int h = 0; h < H; h++) {
+                beta[(size_t)t * H + h] =
+                    sigmoidf_(beta[(size_t)t * H + h]);
+                for (int d = 0; d < D; d++) {
+                    const int i = h * D + d;
+                    decay[at + i] = c->gate_lb *
+                        sigmoidf_(expf(l->alog[h]) *
+                                  (decay[at + i] + l->dt[i]));
+                }
+            }
+            coli_kda_step(core, state, window, qkv, l->conv,
+                          decay + at, beta + (size_t)t * H,
+                          H, D, D, c->conv_k, 1e-6f, scratch);
+            for (int h = 0; h < H; h++) {
+                const float *row = core + (size_t)h * D;
+                float square = 0.0f;
+                for (int d = 0; d < D; d++) square += row[d] * row[d];
+                const float inverse = 1.0f / sqrtf(square / D + c->eps);
+                for (int d = 0; d < D; d++) {
+                    const int i = h * D + d;
+                    normed[at + i] = row[d] * inverse * l->onorm[d] *
+                                      sigmoidf_(gate[at + i]);
+                }
+            }
+        }
+        mv_batch(out + (size_t)base * c->hidden, &l->ko, normed, rows);
+    }
+    free(core); free(qkv); free(normed); free(beta); free(low);
+    free(gate); free(decay); free(v); free(k); free(q);
+}
+
 /* ---------- MLA + indexer con k-pool ---------- */
 static int mla_layer(GModel *m, const GLayer *l, const float *x, int tokens,
                      float *out, float *out_dev, GLayerState *st, int base) {
@@ -3885,8 +3960,15 @@ static float *run_layers(GModel *m, GSession *s, float *streams, float *next,
                     (void)mla_layer(m, l, normed, n, branch, NULL, st, start);
 #endif
                 } else {
-                    kda_layer(c, l, normed, n, branch, st->kda_state, st->kda_window,
-                              s->kda_scratch);
+                    const char *batch_kda = getenv("GLM53_KDA_BATCH_PROJ");
+                    if (n > 1 && batch_kda && strcmp(batch_kda, "1") == 0)
+                        kda_layer_batched(c, l, normed, n, branch,
+                                          st->kda_state, st->kda_window,
+                                          s->kda_scratch);
+                    else
+                        kda_layer(c, l, normed, n, branch,
+                                  st->kda_state, st->kda_window,
+                                  s->kda_scratch);
                 }
             } else {
 #ifdef COLI_CUDA
