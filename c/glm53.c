@@ -1328,6 +1328,11 @@ static void kda_layer_batched(const Cfg *c, const GLayer *l, const float *x,
         kda_layer(c, l, x, tokens, out, state, window, scratch);
         return;
     }
+    static int reported = 0;
+    if (!reported) {
+        fprintf(stderr, "[GLM53_KDA_BATCH] batched prefill active tokens=%d tile=64\n", tokens);
+        reported = 1;
+    }
     const int P = c->kda_proj, H = c->kda_heads, D = c->kda_hd;
     const int tile = 64;
     float *q = malloc((size_t)tile * P * sizeof(float));

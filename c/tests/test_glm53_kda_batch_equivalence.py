@@ -12,6 +12,8 @@ def run(binary:Path,fixture:Path,flag:str,ids:list[int],extra_tokens:int):
     duration=time.monotonic()-start
     if proc.returncode:
         raise RuntimeError(f"{flag} engine exited {proc.returncode}: {proc.stderr[-1000:]}")
+    if flag=="1" and "[GLM53_KDA_BATCH]" not in proc.stderr:
+        raise AssertionError("batched KDA was never exercised by fixture")
     lines={line.split()[0]:line.split()[1:]
            for line in proc.stdout.splitlines() if line.strip()}
     return {"flag":flag,"teacher":[int(v) for v in lines["teacher_forcing"]],

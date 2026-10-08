@@ -163,3 +163,4 @@ c/qwen38_tiny_fp8/
 .oracle-venv/
 c/glm53_tiny/
 c/glm53-kda-experiment.exe
+.oracle-proof/
