@@ -1,7 +1,6 @@
 @echo off
 setlocal
-call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul
-if errorlevel 1 exit /b 1
-cd /d C:\src\colibri-kda-batch-20261008\c
-cl /nologo /std:c11 /Zs /W3 glm53.c
+set "CC=C:\tools\w64devkit-2.10.0\w64devkit\bin\gcc.exe"
+set "ROOT=C:\src\colibri-kda-batch-20261008\c"
+"%CC%" -std=c11 -D_FILE_OFFSET_BITS=64 -fsyntax-only -I "%ROOT%" "%ROOT%\glm53.c"
 exit /b %ERRORLEVEL%
